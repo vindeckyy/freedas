@@ -38,7 +38,7 @@ jobs:
           cp target/${{ matrix.target }}/release/freedas dist/
           cp LICENSE NOTICE dist/
           tar -czf freedas-${{ matrix.target }}.tar.gz -C dist freedas LICENSE NOTICE
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: freedas-${{ matrix.target }}
           path: freedas-${{ matrix.target }}.tar.gz
