@@ -1,0 +1,28 @@
+[package]
+name = "freedas-relay-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "freedas-relay-server"
+path = "src/main.rs"
+
+[dependencies]
+freedas-core = { path = "../freedas-core" }
+freedas-relay = { path = "../freedas-relay" }
+freedas-web = { path = "../freedas-web" }
+axum = { workspace = true, features = ["ws"] }
+tokio.workspace = true
+clap = { workspace = true, features = ["env"] }
+serde.workspace = true
+serde_json.workspace = true
+futures.workspace = true
+tokio-tungstenite = "0.28"
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
+tempfile.workspace = true
+reqwest.workspace = true
+freedas-db = { path = "../freedas-db" }

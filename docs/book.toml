@@ -1,0 +1,8 @@
+[book]
+authors = ["Freedas contributors"]
+title = "Freedas"
+description = "Documentation for Freedas, the open-source coding agent"
+src = "src"
+
+[output.html]
+git-repository-url = "https://github.com/freedas/freedas"

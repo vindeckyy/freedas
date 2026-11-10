@@ -1,0 +1,28 @@
+[package]
+name = "freedas-tui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+freedas-core = { path = "../freedas-core" }
+freedas-tools = { path = "../freedas-tools" }
+freedas-session = { path = "../freedas-session" }
+freedas-db = { path = "../freedas-db" }
+freedas-catalog = { path = "../freedas-catalog" }
+ratatui.workspace = true
+crossterm.workspace = true
+unicode-width.workspace = true
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+freedas-agent = { path = "../freedas-agent" }
+freedas-skill = { path = "../freedas-skill" }
+freedas-sync = { path = "../freedas-sync" }
+freedas-mcp = { path = "../freedas-mcp" }
+freedas-provider = { path = "../freedas-provider" }
+time.workspace = true
+freedas-review = { path = "../freedas-review" }
+tokio-util.workspace = true
+ignore.workspace = true

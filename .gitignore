@@ -1,0 +1,53 @@
+# Build output
+/target/
+/dist/
+/docs/book/
+**/*.rs.bk
+
+# Local runtime state. Project config (freedas.jsonc), agents, skills, and
+# commands stay committable; session and sync state do not.
+.freedas/sync.json
+.freedas/cache/
+.freedas/tmp/
+.freedas/logs/
+.freedas/sessions/
+.freedas/snapshots/
+
+# Plans and scratch notes
+plans/
+.plan/
+plan.md
+PLAN.md
+*.plan.md
+*.plan
+*.plans.md
+local/
+
+# Secrets and credentials. Never commit a real key; use {env:VAR} in config.
+.env
+.env.*
+!.env.example
+!.env.sample
+*.pem
+*.key
+*.p12
+*.pfx
+*.secret
+credentials.json
+id_rsa*
+id_ed25519*
+.aws/
+.ssh/
+.netrc
+
+# Editors and OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Logs and coverage
+*.log
+lcov.info
+coverage/

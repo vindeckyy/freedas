@@ -1,0 +1,2704 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Freedas: session workspace</title>
+<style>
+  :root {
+    color-scheme: dark light;
+    --ink: #0f1110;
+    --panel: #161917;
+    --panel-2: #1c201d;
+    --line: #2b302c;
+    --text: #e7e4dd;
+    --muted: #9aa096;
+    --accent: #8fbf8a;
+    --accent-ink: #0f1110;
+    --warn: #d9a441;
+    --err: #e0785c;
+    --sans: system-ui, -apple-system, "Segoe UI", sans-serif;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    --radius: 6px;
+  }
+  @media (prefers-color-scheme: light) {
+    :root {
+      --ink: #f5f3ee;
+      --panel: #fffefb;
+      --panel-2: #efede6;
+      --line: #ddd8cd;
+      --text: #23241f;
+      --muted: #63665c;
+      --accent: #3f7a44;
+      --accent-ink: #f7f7f2;
+      --warn: #8a6214;
+      --err: #a53f28;
+    }
+  }
+  * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
+  html, body { height: 100%; }
+  body {
+    margin: 0;
+    background: var(--ink);
+    color: var(--text);
+    font: 14px/1.55 var(--sans);
+    -webkit-font-smoothing: antialiased;
+    display: flex;
+    flex-direction: column;
+  }
+  a { color: var(--accent); }
+  :focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+  button, select, input[type="checkbox"], textarea { font: inherit; color: inherit; }
+  button {
+    cursor: pointer;
+    background: var(--panel-2);
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    padding: 6px 12px;
+    min-height: 32px;
+  }
+  button:hover:not(:disabled) { border-color: var(--muted); }
+  button:disabled { cursor: not-allowed; opacity: .55; }
+  button.primary {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: var(--accent-ink);
+    font-weight: 600;
+  }
+  button.primary:hover:not(:disabled) { filter: brightness(1.06); }
+  h1, h2 { margin: 0; font-weight: 600; }
+  h1 { font: 600 15px/1 var(--mono); letter-spacing: .01em; }
+  h2 { font-size: 12px; text-transform: none; color: var(--muted); font-weight: 600; }
+
+  .top {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+    padding: 10px 20px;
+    border-bottom: 1px solid var(--line);
+    background: var(--panel);
+  }
+  .top .state { display: flex; align-items: center; gap: 14px; color: var(--muted); font-size: 12px; }
+  .top .state strong { color: var(--text); font-weight: 500; font-family: var(--mono); }
+
+  .workspace {
+    display: grid;
+    grid-template-columns: 268px minmax(0, 1fr);
+    flex: 1 1 auto;
+    min-height: 0;
+  }
+
+  .rail {
+    border-right: 1px solid var(--line);
+    background: var(--panel);
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+  }
+  .rail-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 12px 14px;
+    border-bottom: 1px solid var(--line);
+  }
+  .rail-list { overflow-y: auto; padding: 6px; min-height: 0; }
+  .rail-empty { padding: 16px 10px; color: var(--muted); font-size: 13px; }
+  .session-item {
+    display: block;
+    width: 100%;
+    text-align: left;
+    border: 1px solid transparent;
+    background: none;
+    padding: 8px 10px;
+    border-radius: var(--radius);
+  }
+  .session-item + .session-item { margin-top: 2px; }
+  .session-item:hover { background: var(--panel-2); }
+  .session-item[aria-current="true"] {
+    background: var(--panel-2);
+    border-color: var(--line);
+  }
+  .session-item .title {
+    display: block;
+    font-weight: 500;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .session-item .meta {
+    display: block;
+    color: var(--muted);
+    font: 11px/1.4 var(--mono);
+    margin-top: 2px;
+  }
+
+  .session { display: flex; flex-direction: column; min-width: 0; min-height: 0; }
+  .session-head {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 6px 16px;
+    padding: 12px 20px;
+    border-bottom: 1px solid var(--line);
+  }
+  .session-head .id { font: 12px var(--mono); color: var(--muted); }
+  .session-head .usage { font: 12px var(--mono); color: var(--muted); margin-left: auto; }
+  .status { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); }
+  .status .dot {
+    width: 7px; height: 7px; border-radius: 50%;
+    background: var(--muted);
+  }
+  .status[data-state="running"] { color: var(--accent); }
+  .status[data-state="running"] .dot { background: var(--accent); animation: breathe 1.6s ease-in-out infinite; }
+  .status[data-state="error"] { color: var(--err); }
+  .status[data-state="error"] .dot { background: var(--err); }
+  @keyframes breathe { 50% { opacity: .35; } }
+  @media (prefers-reduced-motion: reduce) {
+    .status .dot { animation: none !important; }
+  }
+
+  .banners { padding: 0 20px; }
+  .banner {
+    margin-top: 12px;
+    padding: 10px 12px;
+    border: 1px solid var(--line);
+    border-left-width: 3px;
+    border-radius: var(--radius);
+    background: var(--panel);
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 10px;
+    font-size: 13px;
+  }
+  .banner.error { border-left-color: var(--err); }
+  .banner.note { border-left-color: var(--accent); }
+  .banner.blocked { border-left-color: var(--warn); }
+  .banner p { margin: 0; flex: 1 1 260px; }
+  .banner code { font: 12px var(--mono); color: var(--text); }
+
+  .transcript {
+    flex: 1 1 auto;
+    overflow-y: auto;
+    padding: 8px 20px 24px;
+    margin: 0;
+    list-style: none;
+  }
+  .turn {
+    display: grid;
+    grid-template-columns: 72px minmax(0, 1fr);
+    gap: 14px;
+    padding: 12px 0;
+    border-bottom: 1px solid var(--line);
+  }
+  .turn:last-child { border-bottom: 0; }
+  .role {
+    font: 11px/1.7 var(--mono);
+    color: var(--muted);
+    padding-top: 1px;
+  }
+  .turn[data-role="assistant"] .role { color: var(--accent); }
+  .body { min-width: 0; }
+  .body .text { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .body .stamp { display: block; margin-top: 4px; color: var(--muted); font: 11px var(--mono); }
+  details {
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    padding: 6px 10px;
+    margin-top: 8px;
+    background: var(--panel);
+  }
+  details + details { margin-top: 6px; }
+  summary { cursor: pointer; font: 12px var(--mono); color: var(--muted); }
+  summary:hover { color: var(--text); }
+  details pre {
+    margin: 8px 0 2px;
+    padding: 8px;
+    overflow-x: auto;
+    background: var(--panel-2);
+    border-radius: var(--radius);
+    font: 12px/1.5 var(--mono);
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+  .live {
+    display: grid;
+    grid-template-columns: 72px minmax(0, 1fr);
+    gap: 14px;
+    padding: 10px 20px 0;
+    font: 13px/1.6 var(--mono);
+    color: var(--muted);
+  }
+  .live .role { color: var(--accent); }
+  .live .live-text { white-space: pre-wrap; overflow-wrap: anywhere; }
+  .relay-transcript { max-height: 360px; padding: 8px 12px; border: 1px solid var(--line); border-radius: var(--radius); }
+  .relay-transcript p { margin: 0 0 6px; font: 13px/1.6 var(--mono); white-space: pre-wrap; overflow-wrap: anywhere; }
+  .relay-transcript p:last-child { margin-bottom: 0; }
+  .empty {
+    padding: 28px 20px;
+    color: var(--muted);
+    max-width: 46ch;
+  }
+  .empty p { margin: 0 0 12px; }
+  .empty-main {
+    flex: 1 1 auto;
+    display: grid;
+    place-content: center;
+    padding: 32px 20px;
+    text-align: left;
+  }
+  .empty-main h3 { margin: 0 0 6px; font-size: 15px; color: var(--text); }
+  .empty-main p { margin: 0 0 14px; color: var(--muted); max-width: 42ch; }
+
+  .head-actions { display: flex; gap: 8px; margin-left: auto; }
+  .head-actions button { min-height: 28px; padding: 4px 10px; font-size: 12px; }
+  .agent-badge {
+    font: 11px var(--mono);
+    color: var(--muted);
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    padding: 1px 6px;
+  }
+
+  .diff {
+    border-top: 1px solid var(--line);
+    background: var(--panel);
+    max-height: 42vh;
+    overflow-y: auto;
+    padding: 10px 20px 16px;
+  }
+  .diff-head { display: flex; align-items: center; gap: 12px; margin-bottom: 8px; }
+  .diff-head h2 { color: var(--text); font-size: 13px; }
+  .diff-head .count { font: 11px var(--mono); color: var(--muted); }
+  .diff-head .actions { margin-left: auto; display: flex; gap: 8px; }
+  .diff-file { margin-top: 10px; }
+  .diff-file > .path { font: 12px var(--mono); color: var(--text); }
+  .diff-file .stats { font: 11px var(--mono); color: var(--muted); margin-left: 8px; }
+  .diff pre {
+    margin: 4px 0 0;
+    padding: 8px 10px;
+    background: var(--ink);
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    font: 12px/1.5 var(--mono);
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+  .diff .add { color: var(--accent); }
+  .diff .del { color: var(--err); }
+  .diff .hunk { color: var(--muted); }
+  .untracked { margin-top: 10px; font: 12px var(--mono); color: var(--muted); }
+
+  dialog {
+    background: var(--panel);
+    color: var(--text);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 18px;
+    width: min(420px, 92vw);
+  }
+  dialog::backdrop { background: rgba(0, 0, 0, .55); }
+  dialog h2 { color: var(--text); font-size: 15px; margin-bottom: 10px; }
+  dialog p { color: var(--muted); margin: 0 0 12px; font-size: 13px; }
+  dialog label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 4px; }
+  dialog select {
+    width: 100%;
+    padding: 6px 8px;
+    background: var(--ink);
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+  }
+  dialog .desc { font-size: 12px; color: var(--muted); margin-top: 8px; min-height: 2.4em; }
+  dialog .row { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }
+
+  .composer {
+    border-top: 1px solid var(--line);
+    background: var(--panel);
+    padding: 12px 20px 14px;
+  }
+  .composer label.field { display: block; }
+  .composer textarea {
+    width: 100%;
+    min-height: 68px;
+    resize: vertical;
+    padding: 10px 12px;
+    background: var(--ink);
+    color: var(--text);
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    font: 13px/1.55 var(--mono);
+  }
+  .composer textarea:disabled { opacity: .6; cursor: not-allowed; }
+  .composer-foot {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 12px;
+    margin-top: 10px;
+  }
+  .composer-foot .hint { color: var(--muted); font-size: 12px; }
+  .composer-foot .actions { margin-left: auto; display: flex; gap: 8px; }
+  .check { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); cursor: pointer; }
+  .check input { accent-color: var(--accent); }
+
+  .top { flex-wrap: wrap; }
+  .top nav.routes {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 2px;
+    flex: 1 1 auto;
+  }
+  .routes a {
+    color: var(--muted);
+    text-decoration: none;
+    font-size: 12px;
+    padding: 4px 8px;
+    border: 1px solid transparent;
+    border-radius: var(--radius);
+  }
+  .routes a:hover { color: var(--text); background: var(--panel-2); }
+  .routes a[aria-current="page"] { color: var(--text); background: var(--panel-2); border-color: var(--line); }
+
+  .page { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 18px 20px 40px; }
+  .page-head { margin-bottom: 14px; }
+  .page-title { font-size: 16px; color: var(--text); margin: 0 0 4px; }
+  .page-head p { margin: 0; max-width: 72ch; font-size: 13px; }
+  .page-body { display: grid; gap: 14px; max-width: 1100px; }
+  .muted { color: var(--muted); }
+  .note-box {
+    border: 1px solid var(--line);
+    border-left: 3px solid var(--warn);
+    background: var(--panel);
+    border-radius: var(--radius);
+    padding: 12px 14px;
+    max-width: 80ch;
+  }
+  .note-box p { margin: 0; font-size: 13px; }
+  .note-box p + p { margin-top: 8px; }
+  .note-box code { font: 12px var(--mono); }
+  .note-box .row { display: flex; gap: 8px; margin-top: 10px; }
+  .data { border-collapse: collapse; width: 100%; font-size: 13px; }
+  .data th, .data td { text-align: left; padding: 7px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  .data th { color: var(--muted); font: 600 11px var(--mono); text-transform: uppercase; letter-spacing: .04em; }
+  .data td code { font: 12px var(--mono); }
+  .data tr.detail-row td { background: var(--panel); }
+  .file-list { margin: 0; padding-left: 18px; }
+  .actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+  .badge {
+    display: inline-block;
+    font: 11px var(--mono);
+    color: var(--muted);
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    padding: 1px 6px;
+    white-space: nowrap;
+  }
+  .badge + .badge { margin-left: 4px; }
+  .grid-form { display: grid; gap: 12px; max-width: 620px; }
+  .grid-form label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 4px; }
+  .grid-form input, .grid-form select, .grid-form textarea {
+    width: 100%;
+    padding: 7px 9px;
+    background: var(--ink);
+    color: var(--text);
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    font: 13px/1.5 var(--mono);
+  }
+  .grid-form input[readonly] { opacity: .8; }
+  .grid-form .actions { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+  .config-editor {
+    width: 100%;
+    min-height: 320px;
+    padding: 10px 12px;
+    background: var(--ink);
+    color: var(--text);
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    font: 12px/1.55 var(--mono);
+    resize: vertical;
+  }
+  .chart { width: 100%; max-width: 100%; height: auto; }
+  .chart rect.bar { fill: var(--accent); }
+  .chart text { font: 10px var(--mono); fill: var(--muted); }
+  .kv { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 4px 14px; margin: 0; font-size: 13px; }
+  .kv dt { color: var(--muted); font: 12px var(--mono); }
+  .kv dd { margin: 0; font: 12px var(--mono); overflow-wrap: anywhere; }
+  .stat-pair { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 0 24px; align-items: start; }
+
+  @media (max-width: 880px) {
+    .workspace { grid-template-columns: 1fr; grid-template-rows: auto minmax(0, 1fr); height: auto; min-height: calc(100% - 49px); }
+    .top nav.routes { justify-content: flex-start; }
+    .page { padding: 14px 14px 32px; }
+    .rail { border-right: 0; border-bottom: 1px solid var(--line); max-height: 34vh; }
+    .session { min-height: 60vh; }
+    .transcript { padding: 4px 14px 16px; }
+    .turn { grid-template-columns: 56px minmax(0, 1fr); gap: 10px; }
+    .session-head, .composer { padding-left: 14px; padding-right: 14px; }
+    .banners { padding: 0 14px; }
+    .session-head .usage { margin-left: 0; }
+    .live { grid-template-columns: 56px minmax(0, 1fr); gap: 10px; padding: 8px 14px 0; }
+    .head-actions { width: 100%; margin-left: 0; flex-wrap: wrap; }
+  }
+</style>
+</head>
+<body>
+<header class="top">
+  <h1>freedas</h1>
+  <nav class="routes" aria-label="Freedas pages">
+    <a href="#/" data-route="/">Sessions</a>
+    <a href="#/history" data-route="/history">History</a>
+    <a href="#/new" data-route="/new">New</a>
+    <a href="#/settings" data-route="/settings">Settings</a>
+    <a href="#/models" data-route="/models">Models</a>
+    <a href="#/agents" data-route="/agents">Agents</a>
+    <a href="#/skills" data-route="/skills">Skills</a>
+    <a href="#/mcp" data-route="/mcp">MCP</a>
+    <a href="#/plugins" data-route="/plugins">Plugins</a>
+    <a href="#/memory" data-route="/memory">Memory</a>
+    <a href="#/usage" data-route="/usage">Usage</a>
+    <a href="#/reviews" data-route="/reviews">Reviews</a>
+    <a href="#/sandboxes" data-route="/sandboxes">Sandboxes</a>
+    <a href="#/workspaces" data-route="/workspaces">Workspaces</a>
+    <a href="#/relay" data-route="/relay">Relay</a>
+  </nav>
+  <div class="state">
+    <span id="version"></span>
+    <span id="conn">connecting</span>
+  </div>
+</header>
+
+<main class="workspace" id="workspace">
+  <aside class="rail" aria-label="Sessions">
+    <div class="rail-head">
+      <h2 id="rail-title">Sessions</h2>
+      <button id="new-session" aria-describedby="rail-title">New session</button>
+    </div>
+    <nav class="rail-list" id="session-list" aria-label="Recent sessions"></nav>
+  </aside>
+
+  <section class="session" aria-labelledby="session-title">
+    <div class="session-head">
+      <h2 id="session-title">No session selected</h2>
+      <span class="agent-badge" id="session-agent" hidden></span>
+      <span class="id" id="session-id"></span>
+      <span class="status" id="run-status" data-state="idle"><span class="dot" aria-hidden="true"></span><span id="run-label">idle</span></span>
+      <span class="usage" id="usage"></span>
+      <div class="head-actions">
+        <button type="button" id="show-diff" hidden>Review changes</button>
+        <button type="button" id="undo" hidden>Undo last turn</button>
+        <button type="button" id="redo" hidden>Redo</button>
+      </div>
+    </div>
+
+    <div class="banners" id="banners"></div>
+
+    <div class="empty-main" id="session-empty">
+      <div>
+        <h3>No session yet</h3>
+        <p>A session keeps the transcript, the tool calls, and the cost of one task. Start one, then describe what to change.</p>
+        <button type="button" id="new-session-main">Start a session</button>
+      </div>
+    </div>
+
+    <ol class="transcript" id="transcript" hidden role="log" aria-live="polite" aria-relevant="additions"></ol>
+    <div class="live" id="live" hidden><span class="role">freedas</span><span class="live-text" id="live-text"></span></div>
+
+    <section class="diff" id="diff-panel" hidden aria-labelledby="diff-title">
+      <div class="diff-head">
+        <h2 id="diff-title">Working tree changes</h2>
+        <span class="count" id="diff-count"></span>
+        <div class="actions">
+          <button type="button" id="refresh-diff">Refresh</button>
+          <button type="button" id="close-diff">Close</button>
+        </div>
+      </div>
+      <div id="diff-body"></div>
+    </section>
+
+    <form class="composer" id="composer" hidden>
+      <label class="field" for="prompt">Message</label>
+      <textarea id="prompt" name="prompt" rows="3" placeholder="Describe the change, ask about the repo, or paste a stack trace." required></textarea>
+      <div class="composer-foot">
+        <label class="check" title="Auto-approve actions that are not explicitly denied. This removes prompts.">
+          <input type="checkbox" id="auto" name="auto">
+          Auto-approve actions
+        </label>
+        <span class="hint">Enter sends, Shift+Enter adds a line</span>
+        <div class="actions">
+          <button type="button" id="stop" disabled>Stop run</button>
+          <button type="submit" class="primary" id="send">Send</button>
+        </div>
+      </div>
+    </form>
+  </section>
+</main>
+
+<main class="page" id="page" hidden></main>
+
+<dialog id="new-dialog" aria-labelledby="new-title">
+  <form method="dialog" id="new-form">
+    <h2 id="new-title">Start a session</h2>
+    <p>A session keeps the transcript, the tool calls, and the cost of one task.</p>
+    <label for="agent-select">Agent</label>
+    <select id="agent-select" name="agent"></select>
+    <p class="desc" id="agent-desc"></p>
+    <div class="row">
+      <button type="button" id="new-cancel">Cancel</button>
+      <button type="submit" class="primary" id="new-create">Start</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="perm-dialog" aria-labelledby="perm-title" aria-describedby="perm-body">
+  <h2 id="perm-title">Permission requested</h2>
+  <p id="perm-body"></p>
+  <p id="perm-error" class="banner error" role="alert" hidden></p>
+  <div class="row">
+    <button type="button" id="perm-deny">Deny</button>
+    <button type="button" id="perm-always">Allow always</button>
+    <button type="button" class="primary" id="perm-once">Allow once</button>
+  </div>
+</dialog>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const state = {
+  sessions: [],
+  agents: [],
+  current: null,
+  running: false,
+  live: "",
+  usage: null,
+  sessionStatus: "idle",
+  lastPrompt: "",
+  canRedo: false,
+  hasMessages: false,
+  hasEvents: false,
+  orgSlug: "",
+};
+
+// freedas-control also serves this SPA at /me and /org/<slug>. The app routes
+// by hash, so rewrite those pathnames to the workspaces page before routing.
+{
+  const path = location.pathname;
+  if (path === "/me" || path === "/org" || path.startsWith("/org/")) {
+    if (path.startsWith("/org/")) {
+      const slug = path.slice("/org/".length).split("/")[0];
+      if (slug) state.orgSlug = safeDecode(slug);
+    }
+    location.hash = "#/workspaces";
+  }
+}
+
+function setConn(text) { $("conn").textContent = text; }
+
+function setStatus(status) {
+  state.sessionStatus = status;
+  $("run-status").dataset.state = status;
+  $("run-label").textContent = status;
+  $("send").disabled = status === "running";
+  $("stop").disabled = status !== "running";
+  $("prompt").disabled = status === "running";
+}
+
+function clearBanners() { $("banners").replaceChildren(); }
+
+function banner(kind, text, actionLabel, action) {
+  const box = document.createElement("div");
+  box.className = "banner " + kind;
+  const p = document.createElement("p");
+  p.textContent = text;
+  box.append(p);
+  if (actionLabel && action) {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.textContent = actionLabel;
+    b.addEventListener("click", action);
+    box.append(b);
+  }
+  $("banners").append(box);
+}
+
+// A malformed percent escape must not leave a stale view; an empty result
+// falls through to the default route.
+function safeDecode(value) {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return "";
+  }
+}
+
+function controlToken() {
+  try {
+    return localStorage.getItem("freedas.token") || "";
+  } catch (err) {
+    return "";
+  }
+}
+
+async function api(path, options = {}) {
+  const headers = { "content-type": "application/json" };
+  const token = controlToken();
+  if (token) headers.authorization = "Bearer " + token;
+  const res = await fetch(path, { ...options, headers: { ...headers, ...(options.headers || {}) } });
+  if (!res.ok) {
+    const body = await res.text();
+    const error = new Error(res.status + " " + (body || res.statusText));
+    error.status = res.status;
+    error.body = body;
+    throw error;
+  }
+  return res.json();
+}
+
+function el(tag, attrs = {}, ...kids) {
+  const node = document.createElement(tag);
+  for (const [key, value] of Object.entries(attrs)) {
+    if (value == null || value === false) continue;
+    if (key === "class") node.className = value;
+    else if (key === "text") node.textContent = value;
+    else if (key === "value" || key === "checked" || key === "disabled") node[key] = value;
+    else if (key.startsWith("on")) node.addEventListener(key.slice(2), value);
+    else node.setAttribute(key, value === true ? "" : value);
+  }
+  for (const kid of kids.flat(Infinity)) {
+    if (kid != null && kid !== false) node.append(kid);
+  }
+  return node;
+}
+
+function svgEl(tag, attrs = {}, ...kids) {
+  const node = document.createElementNS("http://www.w3.org/2000/svg", tag);
+  for (const [key, value] of Object.entries(attrs)) {
+    if (value == null) continue;
+    if (key === "text") node.textContent = value;
+    else node.setAttribute(key, value);
+  }
+  for (const kid of kids.flat(Infinity)) {
+    if (kid != null) node.append(kid);
+  }
+  return node;
+}
+
+function dataTable(headers, rows) {
+  return el("table", { class: "data" },
+    el("thead", {}, el("tr", {}, headers.map((h) => el("th", { text: h })))),
+    el("tbody", {}, rows.map((cells) => el("tr", {}, cells.map((c) => el("td", {}, c))))));
+}
+
+function badge(text) {
+  return el("span", { class: "badge", text: String(text) });
+}
+
+function page(root, title, sub) {
+  root.replaceChildren(
+    el("div", { class: "page-head" },
+      el("h2", { class: "page-title", text: title }),
+      sub ? el("p", { class: "muted", text: sub }) : null),
+    el("div", { class: "page-body" }));
+  return root.querySelector(".page-body");
+}
+
+function loadingPage(root, title) {
+  root.replaceChildren(
+    el("div", { class: "page-head" }, el("h2", { class: "page-title", text: title })),
+    el("p", { class: "muted", text: "Loading…" }));
+}
+
+function pageFailure(root, title, err, retry) {
+  root.replaceChildren(
+    el("div", { class: "page-head" }, el("h2", { class: "page-title", text: title })),
+    el("div", { class: "note-box" },
+      el("p", { text: "Could not load this page: " + err.message }),
+      el("div", { class: "row" }, el("button", { type: "button", text: "Retry", onclick: retry }))));
+}
+
+// Hosted pages are served by `freedas-control`, which needs a bearer token.
+// On the local server the same paths answer 404, so the page says so instead
+// of pretending the service is down.
+function tokenBar(root) {
+  const input = el("input", { type: "password", id: "control-token", placeholder: "Paste a freedas-control token (freedas tokens create)", value: controlToken() });
+  const status = el("p", { class: "muted", text: controlToken() ? "Token stored in this browser." : "No token stored." });
+  root.append(el("div", { class: "actions" },
+    el("label", { for: "control-token", class: "muted", text: "Control token" }), input,
+    el("button", { type: "button", text: "Use token", onclick: () => {
+      try {
+        localStorage.setItem("freedas.token", input.value.trim());
+      } catch (err) {
+        status.textContent = "This browser blocked storage: " + err.message;
+        return;
+      }
+      status.textContent = "Token stored; reloading.";
+      route();
+    } }),
+    el("button", { type: "button", text: "Sign out", onclick: () => {
+      try {
+        localStorage.removeItem("freedas.token");
+        localStorage.removeItem("freedas.repo");
+      } catch (err) {
+        status.textContent = "This browser blocked storage: " + err.message;
+        return;
+      }
+      status.textContent = "Signed out; reloading.";
+      location.reload();
+    } })));
+  root.append(status);
+}
+
+// One failing section must not take the page down with it.
+function endpointNote(err) {
+  return el("div", { class: "note-box" },
+    el("p", { text: "This endpoint answered " + err.message + "." }),
+    el("p", { text: "On the local server these pages need `freedas-control`; start it and open its URL instead." }));
+}
+
+// freedas-control reports failures as {"error": "..."}; show that sentence
+// rather than the JSON wrapper.
+function apiErrorMessage(err) {
+  try {
+    const parsed = JSON.parse(err.body);
+    if (parsed && typeof parsed.error === "string") return parsed.error;
+  } catch (_) {
+    // Not JSON: fall through to the status line.
+  }
+  return err.message;
+}
+
+function orDash(value) {
+  return value == null || value === "" ? "—" : String(value);
+}
+
+function notePage(root, title, lines) {
+  root.replaceChildren(
+    el("div", { class: "page-head" }, el("h2", { class: "page-title", text: title })),
+    el("div", { class: "note-box" }, lines.map((line) => el("p", { text: line }))));
+}
+
+function dateShort(ms) {
+  if (!ms) return "—";
+  const d = new Date(ms);
+  return Number.isNaN(d.getTime()) ? String(ms) : d.toISOString().slice(0, 10);
+}
+
+function usd(value) {
+  const n = Number(value);
+  return value == null || !Number.isFinite(n) ? "—" : "$" + n.toFixed(2);
+}
+
+function score(value) {
+  const n = Number(value);
+  return value == null || !Number.isFinite(n) ? "—" : n.toFixed(2);
+}
+
+// One control-plane table per call so a failing endpoint reports itself and
+// the rest of the page keeps rendering.
+async function orgSection(box, title, path, columns, row, pick) {
+  box.append(el("h3", { class: "section-title", text: title }));
+  try {
+    const res = await api(path);
+    const list = pick ? pick(res) : (Array.isArray(res) ? res : []);
+    box.append(list.length
+      ? dataTable(columns, list.map(row))
+      : el("p", { class: "muted", text: "No " + title.toLowerCase() + " for this workspace yet." }));
+  } catch (err) {
+    box.append(el("p", { class: "muted", text: "Could not load " + title.toLowerCase() + ": " + err.message }));
+  }
+}
+
+async function tokenSection(box) {
+  const section = el("div", { class: "page-body" });
+  box.append(section);
+  const draw = async () => {
+    section.replaceChildren(el("h3", { class: "section-title", text: "CLI tokens" }));
+    let tokens;
+    try {
+      tokens = await api("/tokens");
+    } catch (err) {
+      section.append(el("p", { class: "muted", text: "Could not load tokens: " + err.message }));
+      return;
+    }
+    const list = Array.isArray(tokens) ? tokens : (tokens && tokens.rows) || [];
+    if (!list.length) {
+      section.append(el("p", { class: "muted", text: "No CLI tokens created. Make one with `freedas tokens create`." }));
+      return;
+    }
+    section.append(dataTable(["ID", "Scopes", "Created", "Expires", "Revoked", "Action"],
+      list.map((t) => {
+        const scopes = Array.isArray(t.scopes)
+          ? t.scopes.join(", ") || "—"
+          : String(t.scopes || "").replace(/^\{|\}$/g, "") || "—";
+        return [
+          el("code", { text: t.id }),
+          scopes,
+          dateShort(t.createdAt),
+          dateShort(t.expiresAt),
+          t.revokedAt ? dateShort(t.revokedAt) : badge("active"),
+          t.revokedAt
+            ? el("span", { class: "muted", text: "revoked" })
+            : el("button", { type: "button", text: "Revoke", onclick: async () => {
+                try {
+                  await api("/tokens/" + encodeURIComponent(t.id), { method: "DELETE" });
+                } catch (err) {
+                  section.append(el("p", { class: "muted", text: "Could not revoke " + t.id + ": " + err.message }));
+                  return;
+                }
+                await draw();
+              } }),
+        ];
+      })));
+  };
+  await draw();
+}
+
+function relTime(ms) {
+  if (!ms) return "";
+  const diff = Math.max(0, Date.now() - ms);
+  const min = Math.floor(diff / 60000);
+  if (min < 1) return "just now";
+  if (min < 60) return min + "m ago";
+  const hr = Math.floor(min / 60);
+  if (hr < 24) return hr + "h ago";
+  return Math.floor(hr / 24) + "d ago";
+}
+
+function renderSessions() {
+  const list = $("session-list");
+  list.replaceChildren();
+  if (!state.sessions.length) {
+    const p = document.createElement("p");
+    p.className = "rail-empty";
+    p.textContent = "No sessions yet. Start one to see the transcript here.";
+    list.append(p);
+    return;
+  }
+  for (const s of state.sessions) {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "session-item";
+    b.dataset.id = s.id;
+    if (s.id === state.current) b.setAttribute("aria-current", "true");
+    const title = document.createElement("span");
+    title.className = "title";
+    title.textContent = s.title || "(untitled)";
+    const meta = document.createElement("span");
+    meta.className = "meta";
+    meta.textContent = [s.agent, s.status, relTime(s.updatedAt)].filter(Boolean).join(" · ");
+    b.append(title, meta);
+    b.addEventListener("click", () => { location.hash = "#/session/" + s.id; });
+    list.append(b);
+  }
+}
+
+async function loadSessions() {
+  if (!state.sessions.length) {
+    const loading = document.createElement("p");
+    loading.className = "rail-empty";
+    loading.textContent = "Loading sessions…";
+    $("session-list").replaceChildren(loading);
+  }
+  try {
+    state.sessions = await api("/session?limit=40");
+    renderSessions();
+  } catch (err) {
+    renderSessions();
+    banner("error", "Could not load sessions: " + err.message, "Retry", loadSessions);
+  }
+}
+
+async function loadMessages(id) {
+  const transcript = $("transcript");
+  const loading = document.createElement("li");
+  loading.className = "empty";
+  loading.textContent = "Loading transcript…";
+  transcript.replaceChildren(loading);
+  let messages;
+  try {
+    messages = await api(`/session/${id}/message`);
+  } catch (err) {
+    banner("error", "Could not load this transcript: " + err.message, "Retry", () => loadMessages(id));
+    return;
+  }
+  transcript.replaceChildren();
+  state.hasMessages = messages.some((m) => m.info.role === "user");
+  $("undo").disabled = !state.hasMessages;
+  if (!messages.length) {
+    const empty = document.createElement("li");
+    empty.className = "empty";
+    const p = document.createElement("p");
+    p.textContent = "This session has no messages yet. Send the first one below.";
+    empty.append(p);
+    transcript.append(empty);
+    return;
+  }
+  for (const message of messages) {
+    const turn = document.createElement("li");
+    turn.className = "turn";
+    turn.dataset.role = message.info.role;
+    const role = document.createElement("span");
+    role.className = "role";
+    role.textContent = message.info.role === "assistant" ? "freedas" : message.info.role;
+    const body = document.createElement("div");
+    body.className = "body";
+    for (const part of message.parts || []) {
+      if (part.type === "text" && part.data.text) {
+        const p = document.createElement("p");
+        p.className = "text";
+        p.textContent = part.data.text;
+        body.append(p);
+      } else if (part.type === "reasoning" && part.data.text) {
+        body.append(collapsible("reasoning", part.data.text));
+      } else if (part.type === "tool") {
+        const calls = (part.data.calls || []).join(", ");
+        body.append(collapsible("tool " + (calls || ""), JSON.stringify(part.data, null, 2)));
+      } else if (part.type === "compaction") {
+        const p = document.createElement("p");
+        p.className = "text";
+        p.textContent = "Context compacted: " + (part.data.summary || "");
+        body.append(p);
+      }
+    }
+    if (message.info.createdAt) {
+      const stamp = document.createElement("span");
+      stamp.className = "stamp";
+      const bits = [new Date(message.info.createdAt).toLocaleString()];
+      if (message.info.model && message.info.model.id) {
+        const provider = message.info.model.provider ? message.info.model.provider + "/" : "";
+        bits.push(provider + message.info.model.id);
+      }
+      if (message.info.router && message.info.router.task_class) {
+        bits.push(message.info.router.task_class);
+      }
+      stamp.textContent = bits.join(" · ");
+      body.append(stamp);
+    }
+    turn.append(role, body);
+    transcript.append(turn);
+  }
+  transcript.scrollTop = transcript.scrollHeight;
+}
+
+function collapsible(label, text) {
+  const d = document.createElement("details");
+  const s = document.createElement("summary");
+  s.textContent = label;
+  const pre = document.createElement("pre");
+  pre.textContent = text;
+  d.append(s, pre);
+  return d;
+}
+
+async function loadUsage(id) {
+  try {
+    const u = await api(`/session/${id}/usage`);
+    state.usage = u;
+    const parts = [];
+    if (u.inputTokens || u.outputTokens) {
+      parts.push("in " + u.inputTokens.toLocaleString());
+      parts.push("out " + u.outputTokens.toLocaleString());
+    }
+    if (u.costUsd) parts.push("$" + u.costUsd.toFixed(4));
+    $("usage").textContent = parts.join(" · ");
+  } catch {
+    state.usage = null;
+    $("usage").textContent = "";
+  }
+}
+
+// Events raised while the stream was down are gone; refetch what the server
+// can report so the view matches the session again.
+async function resyncSession() {
+  await loadSessions();
+  if (!state.current) return;
+  try {
+    const status = await api(`/session/${state.current}/status`);
+    setStatus(status.status === "busy" ? "running" : "idle");
+  } catch {
+    // Status is advisory; the transcript refetch below matters more.
+  }
+  await Promise.all([loadMessages(state.current), loadUsage(state.current)]);
+}
+
+async function selectSession(id) {
+  state.current = id;
+  $("session-empty").hidden = true;
+  $("transcript").hidden = false;
+  $("composer").hidden = false;
+  state.live = "";
+  clearBanners();
+  renderSessions();
+  const s = state.sessions.find((x) => x.id === id);
+  $("session-title").textContent = s ? s.title || "(untitled)" : id;
+  $("session-id").textContent = id;
+  const agentBadge = $("session-agent");
+  agentBadge.hidden = !s;
+  agentBadge.textContent = s ? s.agent : "";
+  $("show-diff").hidden = false;
+  $("undo").hidden = false;
+  $("redo").hidden = false;
+  $("redo").disabled = !state.canRedo;
+  $("diff-panel").hidden = true;
+  setStatus(s && s.status === "running" ? "running" : "idle");
+  $("live").hidden = true;
+  $("live-text").textContent = "";
+  await Promise.all([loadMessages(id), loadUsage(id)]);
+}
+
+async function sendPrompt(event) {
+  event.preventDefault();
+  const text = $("prompt").value.trim();
+  if (!text) return;
+  await submitPrompt(text);
+}
+
+async function submitPrompt(text) {
+  state.lastPrompt = text;
+  if (!state.current) {
+    await createSession("build");
+    if (!state.current) return;
+  }
+  clearBanners();
+  setStatus("running");
+  state.live = "";
+  $("live").hidden = false;
+  $("live-text").textContent = "";
+  try {
+    // Slash commands route to the command endpoint; plain text to /message.
+    if (text.startsWith("/")) {
+      const [name, ...rest] = text.slice(1).split(" ");
+      await api(`/session/${state.current}/command`, {
+        method: "POST",
+        body: JSON.stringify({ name, args: rest.join(" ") }),
+      });
+    } else {
+      await api(`/session/${state.current}/message`, {
+        method: "POST",
+        body: JSON.stringify({ text, auto: $("auto").checked }),
+      });
+    }
+    $("prompt").value = "";
+    await loadMessages(state.current);
+    await loadSessions();
+  } catch (err) {
+    setStatus("error");
+    banner("error", "Send failed: " + err.message, "Retry", () => submitPrompt(text));
+  }
+}
+
+async function stopRun() {
+  if (!state.current) return;
+  $("stop").disabled = true;
+  try {
+    await api(`/session/${state.current}/abort`, { method: "POST" });
+  } catch (err) {
+    banner("error", "Stop failed: " + err.message);
+  }
+}
+
+async function loadAgents() {
+  try {
+    state.agents = (await api("/agent")).filter((a) => a.mode !== "subagent");
+  } catch {
+    state.agents = [{ id: "build", description: "Default coding agent" }];
+  }
+  const select = $("agent-select");
+  select.replaceChildren();
+  for (const a of state.agents) {
+    const option = document.createElement("option");
+    option.value = a.id;
+    option.textContent = a.id;
+    select.append(option);
+  }
+  select.value = "build";
+  updateAgentDesc();
+}
+
+function updateAgentDesc() {
+  const chosen = state.agents.find((a) => a.id === $("agent-select").value);
+  $("agent-desc").textContent = chosen ? chosen.description : "";
+}
+
+function openNewDialog() {
+  clearBanners();
+  if (!$("agent-select").options.length) loadAgents();
+  $("new-dialog").showModal();
+}
+
+async function createSession(agent) {
+  $("new-dialog").close();
+  clearBanners();
+  try {
+    const created = await api("/session", {
+      method: "POST",
+      body: JSON.stringify({ title: "New session", agent }),
+    });
+    await loadSessions();
+    location.hash = "#/session/" + created.id;
+    await route();
+    $("prompt").focus();
+  } catch (err) {
+    banner("error", "Could not start a session: " + err.message, "Retry", () => openNewDialog());
+  }
+}
+
+async function loadDiff() {
+  if (!state.current) return;
+  try {
+    const data = await api(`/session/${state.current}/diff`);
+    const body = $("diff-body");
+    body.replaceChildren();
+    const files = data.files || [];
+    const untracked = data.untracked || [];
+    $("diff-count").textContent = files.length
+      ? files.length + (files.length === 1 ? " file changed" : " files changed")
+      : "no tracked changes";
+    for (const file of files) {
+      const block = document.createElement("div");
+      block.className = "diff-file";
+      const path = document.createElement("div");
+      path.className = "path";
+      path.textContent = file.path;
+      const stats = document.createElement("span");
+      stats.className = "stats";
+      stats.textContent = "+" + file.added + " -" + file.removed;
+      path.append(stats);
+      block.append(path);
+      body.append(block);
+    }
+    if (data.diff) {
+      const pre = document.createElement("pre");
+      for (const line of data.diff.split("\n")) {
+        const span = document.createElement("span");
+        if (line.startsWith("+++") || line.startsWith("---") || line.startsWith("diff ") || line.startsWith("index ")) {
+          span.className = "hunk";
+        } else if (line.startsWith("+")) {
+          span.className = "add";
+        } else if (line.startsWith("-")) {
+          span.className = "del";
+        } else if (line.startsWith("@@")) {
+          span.className = "hunk";
+        }
+        span.textContent = line + "\n";
+        pre.append(span);
+      }
+      body.append(pre);
+    }
+    if (untracked.length) {
+      const note = document.createElement("div");
+      note.className = "untracked";
+      note.textContent = "Untracked: " + untracked.join(", ");
+      body.append(note);
+    }
+    if (!files.length && !untracked.length) {
+      const empty = document.createElement("p");
+      empty.className = "empty";
+      empty.textContent = "No changes in the working tree.";
+      body.append(empty);
+    }
+    $("diff-panel").hidden = false;
+  } catch (err) {
+    banner("error", "Could not read the diff: " + err.message, "Retry", loadDiff);
+  }
+}
+
+async function revertLastTurn() {
+  if (!state.current) return;
+  try {
+    const result = await api(`/session/${state.current}/revert`, { method: "POST" });
+    if (result.error) {
+      banner("error", "Undo failed: " + result.error);
+      return;
+    }
+    state.canRedo = true;
+    $("redo").disabled = false;
+    if (!$("diff-panel").hidden) await loadDiff();
+    banner(
+      "note",
+      "Undid the last turn: restored the working tree and removed " +
+        result.removedMessages + " message(s).",
+      "Redo",
+      redoLastTurn
+    );
+    await Promise.all([loadMessages(state.current), loadUsage(state.current), loadSessions()]);
+  } catch (err) {
+    banner("error", "Undo failed: " + err.message);
+  }
+}
+
+async function redoLastTurn() {
+  if (!state.current) return;
+  try {
+    const result = await api(`/session/${state.current}/unrevert`, { method: "POST" });
+    if (result.error) {
+      banner("error", "Redo failed: " + result.error);
+      return;
+    }
+    clearBanners();
+    state.canRedo = false;
+    $("redo").disabled = true;
+    banner("note", "Files restored. The transcript stays reverted; send a message to continue.");
+    if (!$("diff-panel").hidden) await loadDiff();
+    await Promise.all([loadMessages(state.current), loadSessions()]);
+  } catch (err) {
+    banner("error", "Redo failed: " + err.message);
+  }
+}
+
+async function probeEvents() {
+  try {
+    const res = await fetch("/event", { method: "GET", headers: { accept: "text/event-stream" } });
+    state.hasEvents = res.ok && (res.headers.get("content-type") || "").includes("text/event-stream");
+    if (state.hasEvents) res.body?.cancel();
+  } catch (err) {
+    state.hasEvents = false;
+  }
+}
+
+function connect() {
+  // freedas-control has no /event stream; the dashboard is a snapshot view.
+  if (!state.hasEvents) {
+    setConn("snapshot");
+    return;
+  }
+  const es = new EventSource("/event");
+  let opened = false;
+  es.onopen = async () => {
+    setConn("live");
+    if (opened) await resyncSession();
+    opened = true;
+  };
+  es.onerror = () => setConn("reconnecting");
+  es.onmessage = async (msg) => {
+    let event;
+    try { event = JSON.parse(msg.data); } catch { return; }
+    if (event.type === "server.connected") { setConn("live"); return; }
+    if (event.sessionID && event.sessionID !== state.current) return;
+    if (event.type === "message.part.delta") {
+      state.live += event.text || "";
+      $("live").hidden = false;
+      $("live-text").textContent = state.live;
+      const t = $("transcript");
+      t.scrollTop = t.scrollHeight;
+    } else if (event.type === "session.marker") {
+      state.live += "\n" + (event.marker || "") + "\n";
+      $("live").hidden = false;
+      $("live-text").textContent = state.live;
+    } else if (event.type === "message.part.updated") {
+      state.live = "";
+      $("live").hidden = true;
+      $("live-text").textContent = "";
+      setStatus(event.completed === false ? "error" : "idle");
+      if (event.blocked && event.blocked.length) {
+        banner(
+          "blocked",
+          "Blocked by permissions: " + event.blocked.join(", "),
+          "Retry with auto-approve",
+          () => {
+            $("auto").checked = true;
+            if (state.lastPrompt) submitPrompt(state.lastPrompt);
+          }
+        );
+      }
+      if (state.current) {
+        await loadMessages(state.current);
+        await loadUsage(state.current);
+      }
+      await loadSessions();
+    } else if (event.type === "message.updated") {
+      if (state.current) await loadMessages(state.current);
+    } else if (event.type === "permission.asked") {
+      // A modal, not a native prompt: the dialog never blocks the event
+      // stream, and every queued request keeps its own permissionID.
+      askPermission(event);
+    } else if (event.type === "permission.replied") {
+      // Another client answered this request; close the same modal here.
+      dismissPermission(event.permissionID);
+    } else if (event.type === "session.status") {
+      setStatus(event.status === "busy" ? "running" : "idle");
+    } else if (event.type === "session.idle") {
+      setStatus("idle");
+    } else if (event.type === "session.reverted") {
+      if (state.current) {
+        await Promise.all([loadMessages(state.current), loadUsage(state.current)]);
+      }
+    } else if (event.type === "session.stopped") {
+      setStatus("idle");
+      if (state.current) await loadMessages(state.current);
+    } else if (event.type === "session.error") {
+      setStatus("error");
+      const error = event.error || "unknown error";
+      if (error.includes("permission denied") && error.includes("plan mode")) {
+        banner(
+          "note",
+          "This session is read-only: the plan agent cannot edit files. Start a build session to make the change.",
+          "Start a build session",
+          () => createSession("build")
+        );
+      } else {
+        banner("error", "Run failed: " + error);
+      }
+    } else if (event.type === "session.created" || event.type === "session.deleted") {
+      await loadSessions();
+    }
+  };
+}
+
+$("composer").addEventListener("submit", sendPrompt);
+$("prompt").addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && !e.shiftKey) {
+    e.preventDefault();
+    $("composer").requestSubmit();
+  }
+});
+$("stop").addEventListener("click", stopRun);
+$("new-session").addEventListener("click", openNewDialog);
+$("new-session-main").addEventListener("click", openNewDialog);
+const permQueue = [];
+let permActive = null;
+
+function replyPermission(request, response) {
+  return api(
+    "/session/" + encodeURIComponent(request.sessionID) + "/permissions/" + encodeURIComponent(request.permissionID),
+    { method: "POST", body: JSON.stringify({ response }) }
+  ).then((result) => {
+    // An unknown or already-answered request still answers 200.
+    if (result && result.ok === false) {
+      throw new Error(result.error || "the server did not accept the answer");
+    }
+  });
+}
+
+function showNextPermission() {
+  if (permActive || permQueue.length === 0) return;
+  permActive = permQueue.shift();
+  $("perm-body").textContent =
+    permActive.action + " — " + permActive.resource;
+  $("perm-error").hidden = true;
+  $("perm-dialog").showModal();
+}
+
+async function answerPermission(response) {
+  const request = permActive;
+  if (!request) return;
+  const buttons = [$("perm-once"), $("perm-always"), $("perm-deny")];
+  const error = $("perm-error");
+  error.hidden = true;
+  for (const button of buttons) button.disabled = true;
+  try {
+    await replyPermission(request, response);
+  } catch (err) {
+    // Keep the modal open so the answer can be retried.
+    error.textContent = "Could not send the answer: " + apiErrorMessage(err);
+    error.hidden = false;
+    for (const button of buttons) button.disabled = false;
+    return;
+  }
+  for (const button of buttons) button.disabled = false;
+  permActive = null;
+  $("perm-dialog").close();
+  showNextPermission();
+}
+
+function askPermission(event) {
+  permQueue.push(event);
+  showNextPermission();
+}
+
+function dismissPermission(permissionID) {
+  const idx = permQueue.findIndex((item) => item.permissionID === permissionID);
+  if (idx >= 0) permQueue.splice(idx, 1);
+  if (permActive && permActive.permissionID === permissionID) {
+    permActive = null;
+    $("perm-dialog").close();
+    showNextPermission();
+  }
+}
+
+$("perm-once").addEventListener("click", () => answerPermission("once"));
+$("perm-always").addEventListener("click", () => answerPermission("always"));
+$("perm-deny").addEventListener("click", () => answerPermission("reject"));
+$("perm-dialog").addEventListener("cancel", (event) => {
+  // Esc denies, matching the terminal UI's Esc = cancel.
+  event.preventDefault();
+  answerPermission("reject");
+});
+
+$("new-cancel").addEventListener("click", () => $("new-dialog").close());
+$("agent-select").addEventListener("change", updateAgentDesc);
+$("new-form").addEventListener("submit", (event) => {
+  event.preventDefault();
+  createSession($("agent-select").value);
+});
+$("show-diff").addEventListener("click", loadDiff);
+$("refresh-diff").addEventListener("click", loadDiff);
+$("close-diff").addEventListener("click", () => { $("diff-panel").hidden = true; });
+$("undo").addEventListener("click", revertLastTurn);
+$("redo").addEventListener("click", redoLastTurn);
+
+const PAGES = {};
+const ROUTE_NAMES = [
+  "/", "/session", "/history", "/new", "/settings", "/models", "/agents", "/skills", "/mcp",
+  "/plugins", "/memory", "/usage", "/reviews", "/sandboxes", "/workspaces", "/relay",
+];
+
+PAGES["/new"] = async (root) => {
+  const box = page(root, "New session", "Start a session in this server's project and send the first prompt.");
+  let paths, agents, cfg, providers;
+  try {
+    [paths, agents, cfg, providers] = await Promise.all([
+      api("/path"),
+      api("/agent").catch(() => []),
+      api("/config").catch(() => null),
+      api("/provider").catch(() => []),
+    ]);
+  } catch (err) {
+    pageFailure(root, "New session", err, () => route());
+    return;
+  }
+  const primary = agents.filter((a) => a.mode !== "subagent");
+  const agentSelect = el("select", { id: "new-agent" },
+    primary.length
+      ? primary.map((a) => el("option", { value: a.id, text: a.id }))
+      : [el("option", { value: "build", text: "build" })]);
+  const wanted = cfg && cfg.default_agent ? cfg.default_agent : "build";
+  agentSelect.value = Array.from(agentSelect.options).some((o) => o.value === wanted)
+    ? wanted
+    : (agentSelect.options[0] || { value: "build" }).value;
+  const prompt = el("textarea", { id: "new-prompt", rows: 4, required: true, placeholder: "Describe the change or the question for this session." });
+  const status = el("p", { class: "muted", text: "" });
+  const submit = el("button", { type: "submit", class: "primary", text: "Start session" });
+  const connected = providers.filter((p) => p.connected).map((p) => p.id);
+  const modelLine = cfg && cfg.model
+    ? "Configured model: " + cfg.model + (cfg.small_model ? " (small: " + cfg.small_model + ")" : "")
+    : "No model configured.";
+  box.append(el("form", { class: "grid-form", onsubmit: async (event) => {
+    event.preventDefault();
+    const text = prompt.value.trim();
+    if (!text) { prompt.focus(); return; }
+    submit.disabled = true;
+    status.textContent = "Creating session…";
+    try {
+      const created = await api("/session", {
+        method: "POST",
+        body: JSON.stringify({ title: "New session", agent: agentSelect.value }),
+      });
+      await api(`/session/${created.id}/message`, {
+        method: "POST",
+        body: JSON.stringify({ text, auto: false }),
+      });
+      await loadSessions();
+      location.hash = "#/session/" + created.id;
+    } catch (err) {
+      status.textContent = "Could not start the session: " + err.message;
+      submit.disabled = false;
+    }
+  } },
+    el("div", {}, el("label", { for: "new-project", text: "Project" }), el("input", { id: "new-project", readonly: true, value: paths.root })),
+    el("div", {}, el("label", { for: "new-agent", text: "Agent" }), agentSelect),
+    el("div", {},
+      el("p", { class: "muted", text: modelLine + " This server selects the model per step from config; POST /session accepts only a title and an agent." }),
+      el("p", { class: "muted", text: connected.length ? "Connected providers: " + connected.join(", ") : "No provider has a stored credential." })),
+    el("div", {}, el("label", { for: "new-prompt", text: "First prompt" }), prompt),
+    el("div", { class: "actions" }, submit, status)));
+  prompt.focus();
+};
+
+PAGES["/settings"] = async (root) => {
+  const box = page(root, "Settings", "Effective configuration from GET /config. It arrives as JSON, so JSONC comments are already gone; the editor does not reformat beyond 2-space indentation.");
+  let cfg;
+  try {
+    cfg = await api("/config");
+  } catch (err) {
+    pageFailure(root, "Settings", err, () => route());
+    return;
+  }
+  const editor = el("textarea", { id: "config-json", class: "config-editor", spellcheck: "false", value: JSON.stringify(cfg, null, 2) });
+  const status = el("p", { class: "muted", text: "" });
+  box.append(
+    el("label", { for: "config-json", class: "muted", text: "Effective config (JSON)" }),
+    editor,
+    el("div", { class: "actions" },
+      el("button", { type: "button", class: "primary", text: "Save", onclick: async () => {
+        let parsed;
+        try {
+          parsed = JSON.parse(editor.value);
+        } catch (err) {
+          status.textContent = "Not valid JSON: " + err.message;
+          return;
+        }
+        // Send only the keys that changed: PATCH is a merge patch into the
+        // global config file, so echoing the whole effective config would
+        // copy project values into the global layer.
+        const patch = {};
+        for (const key of Object.keys(parsed)) {
+          if (JSON.stringify(parsed[key]) !== JSON.stringify(cfg[key])) patch[key] = parsed[key];
+        }
+        for (const key of Object.keys(cfg)) {
+          if (!(key in parsed)) patch[key] = null;
+        }
+        if (Object.keys(patch).length === 0) {
+          status.textContent = "No changes to save.";
+          return;
+        }
+        try {
+          const res = await api("/config", { method: "PATCH", body: JSON.stringify(patch) });
+          status.textContent = "Saved " + Object.keys(patch).join(", ") + " to the global config. Effective model: " + (res.model || "unset") + ".";
+          editor.value = JSON.stringify(res, null, 2);
+        } catch (err) {
+          status.textContent = "Save failed: " + err.message;
+        }
+      } }),
+      status));
+  const sandbox = cfg.sandbox || {};
+  box.append(el("div", { class: "note-box" },
+    el("p", { text: "Sandbox: mode=" + (sandbox.mode ?? "unset") + ", network=" + (sandbox.network ?? "unset") + ". The sandbox is chosen when freedas serve starts; this server exposes no runtime sandbox toggle." }),
+    el("p", { text: "Save writes only the keys you changed into the global config (~/.config/freedas/freedas.jsonc), atomically. Project files stay untouched; restart the server to apply keys it reads at startup." })));
+};
+
+PAGES["/models"] = async (root) => {
+  const box = page(root, "Models", "Providers known to this server and the model selection in config.");
+  let providers, cfg;
+  try {
+    [providers, cfg] = await Promise.all([api("/provider"), api("/config")]);
+  } catch (err) {
+    pageFailure(root, "Models", err, () => route());
+    return;
+  }
+  box.append(dataTable(["Provider", "Credential"],
+    providers.map((p) => [el("code", { text: p.id }), p.connected ? badge("connected") : el("span", { class: "muted", text: "no credential" })])));
+  box.append(el("dl", { class: "kv" },
+    el("dt", { text: "model" }), el("dd", { text: cfg.model || "not set" }),
+    el("dt", { text: "small_model" }), el("dd", { text: cfg.small_model || "not set" }),
+    el("dt", { text: "router.mode" }), el("dd", { text: (cfg.router && cfg.router.mode) || "not set" })));
+  box.append(el("div", { class: "note-box" },
+    el("p", { text: "This server has no model catalog endpoint. GET /provider lists provider ids and whether a credential is stored; the model list lives in the embedded catalog used by the runner, not in the API." })));
+};
+
+PAGES["/agents"] = async (root) => {
+  const box = page(root, "Agents", "Built-in agents served by GET /agent.");
+  let agents;
+  try {
+    agents = await api("/agent");
+  } catch (err) {
+    pageFailure(root, "Agents", err, () => route());
+    return;
+  }
+  if (!agents.length) {
+    box.append(el("p", { class: "muted", text: "No agents reported." }));
+    return;
+  }
+  box.append(dataTable(["ID", "Mode", "Description"],
+    agents.map((a) => [el("code", { text: a.id }), badge(a.mode || "unknown"), a.description || "—"])));
+  box.append(el("div", { class: "note-box" },
+    el("p", { text: "GET /agent returns id, mode, and description only. Model and source are not exposed by this server, so they are not shown." })));
+};
+
+PAGES["/skills"] = async (root) => {
+  const box = page(root, "Skills", "Skills discovered from the project and global skill folders.");
+  let commands;
+  try {
+    commands = await api("/command");
+  } catch (err) {
+    pageFailure(root, "Skills", err, () => route());
+    return;
+  }
+  box.append(el("p", { class: "muted", text: "This server has no /skills endpoint. GET /command merges project commands, discovered skills, and MCP prompts, and does not label each entry's kind." }));
+  if (!commands.length) {
+    box.append(el("p", { class: "muted", text: "No commands or skills discovered." }));
+    return;
+  }
+  box.append(dataTable(["Name", "Description", "Kind"],
+    commands.map((c) => [el("code", { text: c.name }), c.description || "—", c.mcp ? badge("MCP prompt") : el("span", { class: "muted", text: "command or skill" })])));
+};
+
+PAGES["/mcp"] = async (root) => {
+  const box = page(root, "MCP servers", "Servers from the effective config, with connection state from GET /mcp.");
+  let servers;
+  try {
+    servers = await api("/mcp");
+  } catch (err) {
+    pageFailure(root, "MCP servers", err, () => route());
+    return;
+  }
+  box.append(servers.length
+    ? dataTable(["Name", "State", "Tools", "Prompts", "Error"],
+        servers.map((s) => [el("code", { text: s.name }), badge(s.state || "unknown"), s.tools == null ? "—" : String(s.tools), s.prompts == null ? "—" : String(s.prompts), s.error || "—"]))
+    : el("p", { class: "muted", text: "No MCP servers configured." }));
+  const name = el("input", { id: "mcp-name", required: true, placeholder: "server-name" });
+  const type = el("select", { id: "mcp-type" },
+    el("option", { value: "remote", text: "remote (URL)" }),
+    el("option", { value: "local", text: "local (command)" }));
+  const url = el("input", { id: "mcp-url", placeholder: "https://mcp.example.com/mcp" });
+  const command = el("input", { id: "mcp-command", placeholder: "npx -y @acme/mcp-server" });
+  const commandRow = el("div", { hidden: true }, el("label", { for: "mcp-command", text: "Command" }), command);
+  const urlRow = el("div", {}, el("label", { for: "mcp-url", text: "URL" }), url);
+  const result = el("p", { class: "muted", text: "" });
+  const toggle = () => {
+    urlRow.hidden = type.value !== "remote";
+    commandRow.hidden = type.value !== "local";
+  };
+  type.addEventListener("change", toggle);
+  box.append(el("form", { class: "grid-form", onsubmit: async (event) => {
+    event.preventDefault();
+    const config = type.value === "remote"
+      ? { type: "remote", url: url.value.trim() }
+      : { type: "local", command: command.value.trim().split(/\s+/).filter(Boolean) };
+    if (type.value === "remote" && !config.url) { result.textContent = "A remote server needs a URL."; return; }
+    if (type.value === "local" && !config.command.length) { result.textContent = "A local server needs a command."; return; }
+    try {
+      const res = await api("/mcp", { method: "POST", body: JSON.stringify({ name: name.value.trim(), config }) });
+      if (res.ok === false) { result.textContent = "Add failed: " + (res.error || "unknown error"); return; }
+      result.textContent = "Saved to " + (res.path || "the project config") + ". Reloading…";
+      await route();
+    } catch (err) {
+      result.textContent = "Add failed: " + err.message;
+    }
+  } },
+    el("div", {}, el("label", { for: "mcp-name", text: "Name" }), name),
+    el("div", {}, el("label", { for: "mcp-type", text: "Type" }), type),
+    urlRow,
+    commandRow,
+    el("div", { class: "actions" }, el("button", { type: "submit", class: "primary", text: "Add server" }), result)));
+  toggle();
+  box.append(el("div", { class: "note-box" },
+    el("p", { text: "Adding a server rewrites the project config as plain JSON, so comments in the original JSONC file are lost (the same tradeoff the server applies to permissions)." })));
+};
+
+PAGES["/plugins"] = (root) => notePage(root, "Plugins", [
+  "Not available on this server. freedas-server exposes no plugins API, so this page has no data to show.",
+  "Plugins are managed by the CLI: `freedas plugin list`, `freedas plugin remove <name>`, and `freedas plugin update`.",
+]);
+
+PAGES["/memory"] = (root) => notePage(root, "Memory", [
+  "Not available on this server. freedas-server exposes no memory API.",
+  "Memory lives in the local database and is managed with `freedas memory list`, `freedas memory export`, and `freedas memory forget`.",
+]);
+
+const barChart = (items, ariaLabel) => {
+  const H = 150, barW = 26, gap = 12, pad = 14, labelH = 44;
+  const W = Math.max(360, pad * 2 + items.length * (barW + gap));
+  const max = Math.max(...items.map((i) => i.value), 1);
+  const svg = svgEl("svg", { viewBox: `0 0 ${W} ${H + labelH}`, class: "chart", role: "img", "aria-label": ariaLabel });
+  items.forEach((item, i) => {
+    const h = Math.max(item.value > 0 ? 2 : 0, Math.round((item.value / max) * H));
+    const x = pad + i * (barW + gap);
+    svg.append(svgEl("rect", { x, y: H - h, width: barW, height: h, class: "bar" }, svgEl("title", { text: item.title })));
+    svg.append(svgEl("text", { x: x + barW / 2, y: H + 16, "text-anchor": "middle", text: item.short }));
+    svg.append(svgEl("text", { x: x + barW / 2, y: H + 30, "text-anchor": "middle", text: item.display }));
+  });
+  return svg;
+};
+
+PAGES["/usage"] = async (root) => {
+  const box = page(root, "Usage", "Token and cost totals recorded per session in the local database.");
+  let statusMap, sessions;
+  try {
+    [statusMap, sessions] = await Promise.all([api("/session/status"), api("/session?limit=40")]);
+  } catch (err) {
+    pageFailure(root, "Usage", err, () => route());
+    return;
+  }
+  const rows = await Promise.all(sessions.map(async (s) => {
+    try {
+      return { session: s, usage: await api(`/session/${s.id}/usage`) };
+    } catch {
+      return { session: s, usage: null };
+    }
+  }));
+  let input = 0, output = 0, cost = 0;
+  const tableRows = rows.map(({ session, usage }) => {
+    const u = usage || {};
+    input += u.inputTokens || 0;
+    output += u.outputTokens || 0;
+    cost += u.costUsd || 0;
+    return [
+      el("a", { href: "#/session/" + session.id, text: session.title || session.id }),
+      badge(statusMap[session.id] === "busy" ? "running" : "idle"),
+      (u.inputTokens || 0).toLocaleString(),
+      (u.outputTokens || 0).toLocaleString(),
+      "$" + (u.costUsd || 0).toFixed(4),
+    ];
+  });
+  box.append(el("dl", { class: "kv" },
+    el("dt", { text: "sessions" }), el("dd", { text: String(rows.length) }),
+    el("dt", { text: "input tokens" }), el("dd", { text: input.toLocaleString() }),
+    el("dt", { text: "output tokens" }), el("dd", { text: output.toLocaleString() }),
+    el("dt", { text: "cost" }), el("dd", { text: "$" + cost.toFixed(4) })));
+  if (!rows.length) {
+    box.append(el("p", { class: "muted", text: "No sessions recorded yet." }));
+    return;
+  }
+  const useCost = cost > 0;
+  const items = rows
+    .filter(({ usage }) => usage && ((usage.inputTokens || 0) + (usage.outputTokens || 0) > 0 || (usage.costUsd || 0) > 0))
+    .map(({ session, usage }) => {
+      const title = session.title || session.id;
+      const value = useCost
+        ? (usage.costUsd || 0)
+        : (usage.inputTokens || 0) + (usage.outputTokens || 0);
+      return {
+        short: title.slice(0, 8),
+        title: title + ": " + (useCost ? "$" + value.toFixed(4) : value.toLocaleString() + " tokens"),
+        value,
+        display: useCost ? "$" + value.toFixed(4) : value.toLocaleString(),
+      };
+    })
+    .sort((a, b) => b.value - a.value)
+    .slice(0, 12);
+  if (!items.length) {
+    box.append(el("p", { class: "muted", text: "No token or cost usage recorded yet." }));
+  } else {
+    box.append(el("h3", { class: "page-title", text: useCost ? "Cost per session (USD)" : "Tokens per session" }));
+    box.append(barChart(items, useCost ? "Cost per session in US dollars" : "Tokens per session"));
+  }
+  box.append(dataTable(["Session", "Status", "Input tokens", "Output tokens", "Cost"], tableRows));
+  box.append(el("div", { class: "note-box" },
+    el("p", { text: "This server has no day-bucketed usage endpoint. Totals above are summed from GET /session/{id}/usage for the 40 most recent sessions, and the chart is per session, not per day." })));
+};
+
+PAGES["/history"] = async (root) => {
+  const box = page(root, "History",
+    "Session metadata recorded by freedas-control: when each session ran, which model it used, tokens and cost, files read, and a prompt excerpt.");
+  tokenBar(box);
+  let sessions;
+  try {
+    const res = await api("/sessions?limit=50");
+    sessions = Array.isArray(res) ? res : (res.rows || res.data || []);
+  } catch (err) {
+    box.append(endpointNote(err));
+    return;
+  }
+  // The relay server answers /sessions with relay sessions, not history.
+  if (sessions.length && !sessions.some((s) => s && ("startedAt" in s || "project" in s))) {
+    box.append(el("div", { class: "note-box" },
+      el("p", { text: "GET /sessions on this origin returned relay sessions, not session history. Open the freedas-control dashboard for history." })));
+    return;
+  }
+  if (!sessions.length) {
+    box.append(el("p", { class: "muted", text: "No session history recorded for this workspace yet." }));
+    return;
+  }
+  const iso = (ms) => {
+    if (!ms) return "—";
+    const d = new Date(ms);
+    return Number.isNaN(d.getTime()) ? String(ms) : d.toISOString();
+  };
+  const tbody = el("tbody", {});
+  for (const s of sessions) {
+    const files = Array.isArray(s.filesRead) ? s.filesRead : [];
+    const detail = el("tr", { class: "detail-row", hidden: true },
+      el("td", { colspan: "9" },
+        el("dl", { class: "kv" },
+          el("dt", { text: "session" }), el("dd", {}, el("code", { text: orDash(s.sessionID) })),
+          el("dt", { text: "started" }), el("dd", { text: iso(s.startedAt) }),
+          el("dt", { text: "ended" }), el("dd", { text: iso(s.endedAt) }),
+          el("dt", { text: "files read" }), el("dd", {}, files.length
+            ? el("ul", { class: "file-list" }, files.map((f) => el("li", {}, el("code", { text: String(f) }))))
+            : "—"),
+          el("dt", { text: "prompt" }), el("dd", { text: s.promptExcerpt || "—" }))));
+    const toggle = el("button", { type: "button", text: "Details", "aria-expanded": "false" });
+    toggle.addEventListener("click", () => {
+      detail.hidden = !detail.hidden;
+      toggle.textContent = detail.hidden ? "Details" : "Hide";
+      toggle.setAttribute("aria-expanded", detail.hidden ? "false" : "true");
+    });
+    tbody.append(el("tr", {},
+      el("td", { text: dateShort(s.startedAt) }),
+      el("td", {}, el("code", { text: orDash(s.project) })),
+      el("td", {}, el("code", { text: orDash(s.model) })),
+      el("td", { text: orDash(s.inputTokens) }),
+      el("td", { text: orDash(s.outputTokens) }),
+      el("td", { text: usd(s.costUsd) }),
+      el("td", { text: Array.isArray(s.filesRead) ? String(s.filesRead.length) : "—" }),
+      el("td", { text: s.promptExcerpt || "—" }),
+      el("td", {}, toggle)),
+      detail);
+  }
+  box.append(el("table", { class: "data" },
+    el("thead", {}, el("tr", {}, ["Started", "Project", "Model", "Tokens in", "Tokens out", "Cost", "Files read", "Prompt excerpt", ""].map((h) => el("th", { text: h })))),
+    tbody));
+  box.append(el("div", { class: "note-box" },
+    el("p", { text: "GET /sessions?limit=50 returns the 50 most recent sessions for this workspace. The excerpt is truncated by freedas-control; open the session for the full transcript." })));
+};
+
+PAGES["/reviews"] = async (root) => {
+  const box = page(root, "Reviews",
+    "Pull-request reviews run by the freedas-review worker, listed by freedas-control.");
+  tokenBar(box);
+
+  box.append(el("h3", { class: "section-title", text: "Analytics" }));
+  try {
+    const stats = await api("/reviews/analytics");
+    box.append(el("dl", { class: "kv" },
+      el("dt", { text: "reviews" }), el("dd", { text: (stats.total || 0).toLocaleString() }),
+      el("dt", { text: "findings" }), el("dd", { text: (stats.findings || 0).toLocaleString() }),
+      el("dt", { text: "avg confidence" }), el("dd", { text: Number(stats.averageConfidence || 0).toFixed(2) }),
+      el("dt", { text: "cost" }), el("dd", { text: usd(stats.totalCostUsd || 0) })));
+    const bySeverity = stats.bySeverity || {};
+    const contributors = stats.contributors || [];
+    box.append(el("div", { class: "stat-pair" },
+      el("div", {},
+        el("h3", { class: "section-title", text: "Findings by severity" }),
+        dataTable(["Severity", "Findings"],
+          ["blocker", "high", "medium", "low", "nit"].map((severity) => [severity, String(bySeverity[severity] || 0)]))),
+      el("div", {},
+        el("h3", { class: "section-title", text: "Contributors" }),
+        contributors.length
+          ? dataTable(["Author", "Reviews"], contributors.map((c) => [orDash(c.author), String(c.reviews)]))
+          : el("p", { class: "muted", text: "No review authors recorded yet." }))));
+  } catch (err) {
+    box.append(endpointNote(err));
+  }
+
+  box.append(el("h3", { class: "section-title", text: "Recent reviews" }));
+  let reviewRows = [];
+  const reviewsBox = el("div", {});
+  box.append(reviewsBox);
+  const drawReviews = async () => {
+    reviewsBox.replaceChildren();
+    try {
+      const res = await api("/reviews");
+      reviewRows = Array.isArray(res) ? res : (res.rows || res.data || [res]);
+      reviewsBox.append(reviewRows.length
+        ? dataTable(["Repo", "PR", "Commit", "Status", "Confidence", "Risk", "Author", "Created", "Review"],
+            reviewRows.map((r) => [
+              orDash(r.repo),
+              orDash(r.prNumber),
+              r.headSha ? String(r.headSha).slice(0, 7) : "—",
+              orDash(r.status),
+              score(r.confidence),
+              score(r.risk),
+              orDash(r.author),
+              relTime(r.createdAt),
+              r.reviewUrl ? el("a", { href: r.reviewUrl, text: "Review" }) : "—",
+            ]))
+        : el("p", { class: "muted", text: "No reviews recorded yet." }));
+    } catch (err) {
+      reviewRows = [];
+      reviewsBox.append(endpointNote(err));
+    }
+  };
+  await drawReviews();
+
+  box.append(el("h3", { class: "section-title", text: "Pull requests" }));
+  let storedRepo = "";
+  try { storedRepo = localStorage.getItem("freedas.repo") || ""; } catch (err) { /* storage is optional */ }
+  const repoInput = el("input", { id: "pulls-repo", placeholder: "owner/name", autocomplete: "off", value: storedRepo });
+  const stateSelect = el("select", { id: "pulls-state" },
+    el("option", { value: "open", text: "open" }),
+    el("option", { value: "closed", text: "closed" }),
+    el("option", { value: "all", text: "all" }));
+  const filterInput = el("input", { id: "pulls-filter", placeholder: "Filter title or author" });
+  const loadButton = el("button", { type: "button", class: "primary", text: "Load" });
+  const startButton = el("button", { type: "button", text: "Start review", disabled: true });
+  const pullsStatus = el("p", { class: "muted", text: "Load a repository to browse its pull requests." });
+  const reviewLog = el("div", { class: "note-box", hidden: true });
+  const results = el("div", {});
+  let loaded = { repo: "", rows: [] };
+  let boxes = [];
+  const authorName = (p) => (p.author && typeof p.author === "object" ? p.author.login : p.author) || "";
+
+  const isReviewed = (pull) => reviewRows.some((r) => r
+    && String(r.repo || "").toLowerCase() === loaded.repo.toLowerCase()
+    && Number(r.prNumber) === Number(pull.number)
+    && String(r.headSha || "").toLowerCase() === String(pull.headSha || "").toLowerCase());
+
+  const render = () => {
+    const q = filterInput.value.trim().toLowerCase();
+    const rows = loaded.rows.filter((p) => !q || String(p.title || "").toLowerCase().includes(q) || String(authorName(p)).toLowerCase().includes(q));
+    boxes = [];
+    startButton.disabled = true;
+    results.replaceChildren();
+    if (!loaded.repo) return;
+    if (!rows.length) {
+      results.append(el("p", { class: "muted", text: loaded.rows.length ? "No pull requests match this filter." : "No pull requests for this repository and state." }));
+      return;
+    }
+    const all = el("input", { type: "checkbox", "aria-label": "Select all visible pull requests" });
+    all.addEventListener("change", () => {
+      for (const entry of boxes) entry.box.checked = all.checked;
+      startButton.disabled = !boxes.some((entry) => entry.box.checked);
+    });
+    const tbody = el("tbody", {});
+    for (const p of rows) {
+      const check = el("input", { type: "checkbox", "aria-label": "Select PR #" + p.number });
+      check.addEventListener("change", () => { startButton.disabled = !boxes.some((entry) => entry.box.checked); });
+      boxes.push({ box: check, pull: p });
+      tbody.append(el("tr", {},
+        el("td", {}, check),
+        el("td", {}, p.url ? el("a", { href: p.url, text: "#" + p.number }) : el("code", { text: "#" + p.number })),
+        el("td", { text: orDash(p.title) }),
+        el("td", { text: orDash(authorName(p)) }),
+        el("td", {}, badge(p.state || "unknown"), p.draft ? badge("draft") : null, isReviewed(p) ? badge("reviewed") : null),
+        el("td", {}, el("code", { text: p.headSha ? String(p.headSha).slice(0, 7) : "—" }))));
+    }
+    results.append(el("table", { class: "data" },
+      el("thead", {}, el("tr", {},
+        el("th", {}, all),
+        ["PR", "Title", "Author", "State", "Head"].map((h) => el("th", { text: h })))),
+      tbody));
+  };
+
+  loadButton.addEventListener("click", async () => {
+    const repo = repoInput.value.trim();
+    if (!/^[^/\s]+\/[^/\s]+$/.test(repo)) {
+      pullsStatus.textContent = "Enter the repository as owner/name.";
+      return;
+    }
+    try { localStorage.setItem("freedas.repo", repo); } catch (err) { /* storage is optional */ }
+    loadButton.disabled = true;
+    pullsStatus.textContent = "Loading…";
+    try {
+      const res = await api("/github/pulls?repo=" + encodeURIComponent(repo) + "&state=" + encodeURIComponent(stateSelect.value));
+      const rows = Array.isArray(res) ? res : (res.pulls || []);
+      loaded = { repo, rows };
+      pullsStatus.textContent = rows.length + " pull request" + (rows.length === 1 ? "" : "s") + " for " + repo + ".";
+      render();
+    } catch (err) {
+      loaded = { repo: "", rows: [] };
+      boxes = [];
+      startButton.disabled = true;
+      results.replaceChildren(endpointNote(err));
+      pullsStatus.textContent = "";
+    } finally {
+      loadButton.disabled = false;
+    }
+  });
+
+  filterInput.addEventListener("input", render);
+
+  startButton.addEventListener("click", async () => {
+    const chosen = boxes.filter((entry) => entry.box.checked);
+    if (!chosen.length || !loaded.repo) return;
+    startButton.disabled = true;
+    reviewLog.hidden = false;
+    reviewLog.replaceChildren();
+    let failures = 0;
+    for (const entry of chosen) {
+      const label = loaded.repo + "#" + entry.pull.number;
+      if (!entry.pull.headSha) {
+        failures++;
+        reviewLog.append(el("p", { text: label + ": no head SHA, skipped." }));
+        continue;
+      }
+      try {
+        const res = await api("/reviews", { method: "POST", body: JSON.stringify({ repo: loaded.repo, prNumber: entry.pull.number, headSha: entry.pull.headSha }) });
+        reviewLog.append(el("p", { text: label + ": " + orDash(res && res.status ? res.status : "queued") + "." }));
+      } catch (err) {
+        failures++;
+        reviewLog.append(el("p", { text: label + ": " + apiErrorMessage(err) }));
+      }
+    }
+    pullsStatus.textContent = failures
+      ? "Finished with " + failures + " failure" + (failures === 1 ? "" : "s") + "."
+      : "Queued " + chosen.length + " review" + (chosen.length === 1 ? "" : "s") + ".";
+    await drawReviews();
+    render();
+  });
+
+  box.append(
+    el("div", { class: "actions" },
+      el("label", { for: "pulls-repo", class: "muted", text: "Repository" }), repoInput,
+      el("label", { for: "pulls-state", class: "muted", text: "State" }), stateSelect,
+      el("label", { for: "pulls-filter", class: "muted", text: "Filter" }), filterInput,
+      loadButton),
+    el("div", { class: "actions" }, startButton, pullsStatus),
+    reviewLog,
+    results);
+  box.append(el("div", { class: "note-box" },
+    el("p", { text: "GET /github/pulls needs a repository the GitHub App installation can read. The reviewed badge comes from GET /reviews matching repo, PR number, and head SHA; selecting a reviewed row still posts a review request." })));
+
+  box.append(el("h3", { class: "section-title", text: "Review policy" }));
+  let policy;
+  try {
+    policy = await api("/reviews/config");
+  } catch (err) {
+    box.append(endpointNote(err));
+    return;
+  }
+  const editor = el("textarea", { id: "review-policy", class: "config-editor", spellcheck: "false", value: JSON.stringify(policy, null, 2) });
+  const status = el("p", { class: "muted", text: "" });
+  box.append(
+    el("label", { for: "review-policy", class: "muted", text: "Review policy (JSON)" }),
+    editor,
+    el("div", { class: "actions" },
+      el("button", { type: "button", class: "primary", text: "Save", onclick: async () => {
+        let parsed;
+        try {
+          parsed = JSON.parse(editor.value);
+        } catch (err) {
+          status.textContent = "Not valid JSON: " + err.message;
+          return;
+        }
+        status.textContent = "Saving…";
+        try {
+          const res = await api("/reviews/config", { method: "PATCH", body: JSON.stringify(parsed) });
+          editor.value = JSON.stringify(res, null, 2);
+          status.textContent = "Saved. The editor now shows the stored policy.";
+        } catch (err) {
+          status.textContent = "Save failed: " + apiErrorMessage(err);
+        }
+      } }),
+      status),
+    el("div", { class: "note-box" },
+      el("p", { text: "Save PATCHes the parsed object to /reviews/config; freedas-control merges the keys you send into the stored policy and only owners and admins may write." })));
+};
+
+PAGES["/sandboxes"] = async (root) => {
+  const box = page(root, "Sandboxes",
+    "Cloud sandboxes started by freedas-sandbox-runner and tracked by freedas-control.");
+  tokenBar(box);
+
+  const section = el("div", {});
+  box.append(section);
+
+  const draw = async () => {
+    section.replaceChildren(el("h3", { class: "section-title", text: "Sandboxes" }));
+    let rows;
+    try {
+      const res = await api("/sandboxes");
+      rows = Array.isArray(res) ? res : (res.rows || res.data || [res]);
+    } catch (err) {
+      section.append(endpointNote(err));
+      return;
+    }
+    if (!rows.length) {
+      section.append(el("p", { class: "muted", text: "No sandboxes have been started." }));
+      return;
+    }
+    // Fields a runner has not reported yet render as "—", never as undefined.
+    section.append(dataTable(
+      ["Repo", "Base", "Status", "Compute (s)", "Cost", "PR", ""],
+      rows.map((x) => [
+        orDash(x.repo),
+        orDash(x.baseBranch),
+        orDash(x.status),
+        x.computeSeconds == null ? "—" : String(x.computeSeconds),
+        usd(x.costUsd),
+        x.prNumber != null && x.prUrl
+          ? el("a", { href: x.prUrl, text: "#" + x.prNumber })
+          : "—",
+        x.status === "running" || x.status === "queued" || x.status === "provisioning"
+          ? el("button", { type: "button", text: "Stop", onclick: async () => {
+              try {
+                await api("/sandboxes/" + encodeURIComponent(x.id) + "/stop", { method: "POST", body: "{}" });
+              } catch (err) {
+                section.append(el("p", { class: "muted", text: "Could not stop " + x.id + ": " + apiErrorMessage(err) }));
+                return;
+              }
+              await draw();
+            } })
+          : "",
+      ])));
+  };
+
+  if (controlToken()) {
+    const repo = el("input", { id: "sandbox-repo", required: true, placeholder: "owner/name" });
+    const base = el("input", { id: "sandbox-base", value: "main" });
+    const task = el("textarea", { id: "sandbox-task", rows: 3, required: true, placeholder: "What should the sandbox do?" });
+    const status = el("p", { class: "muted", text: "" });
+    const submit = el("button", { type: "submit", class: "primary", text: "Start sandbox" });
+    box.append(el("h3", { class: "section-title", text: "Start a sandbox" }));
+    box.append(el("form", { class: "grid-form", onsubmit: async (event) => {
+      event.preventDefault();
+      submit.disabled = true;
+      status.textContent = "Starting…";
+      try {
+        await api("/sandboxes", { method: "POST", body: JSON.stringify({
+          repo: repo.value.trim(),
+          baseBranch: base.value.trim() || "main",
+          task: task.value.trim(),
+        }) });
+      } catch (err) {
+        // The control plane's refusal is the useful text: "cloud sandboxes are
+        // disabled for this workspace", "wallet is empty", and so on.
+        status.textContent = apiErrorMessage(err);
+        submit.disabled = false;
+        return;
+      }
+      repo.value = "";
+      base.value = "main";
+      task.value = "";
+      status.textContent = "Sandbox queued.";
+      submit.disabled = false;
+      await draw();
+    } },
+      el("div", {}, el("label", { for: "sandbox-repo", text: "Repository" }), repo),
+      el("div", {}, el("label", { for: "sandbox-base", text: "Base branch" }), base),
+      el("div", {}, el("label", { for: "sandbox-task", text: "Task" }), task),
+      el("div", { class: "actions" }, submit, status)));
+  }
+
+  await draw();
+};
+
+// POST one create body and repaint the page so the new row is the one the
+// server returns. The control plane's refusal stays visible under the form.
+async function createAndReload(status, path, body) {
+  status.textContent = "Saving…";
+  try {
+    await api(path, { method: "POST", body: JSON.stringify(body) });
+  } catch (err) {
+    status.textContent = "Save failed: " + apiErrorMessage(err);
+    return;
+  }
+  await route();
+}
+
+async function walletSection(box) {
+  box.append(el("h3", { class: "section-title", text: "Wallet" }));
+  try {
+    const wallet = await api("/wallet");
+    box.append(dataTable(["Balance"], [[usd(wallet.balanceUsd)]]));
+  } catch (err) {
+    box.append(el("p", { class: "muted", text: "Could not load wallet: " + apiErrorMessage(err) }));
+  }
+  if (!controlToken()) return;
+  const amount = el("input", { id: "credit-amount", type: "number", min: "0.01", step: "0.01", required: true, placeholder: "25.00" });
+  const status = el("p", { class: "muted", text: "" });
+  box.append(el("form", { class: "grid-form", onsubmit: async (event) => {
+    event.preventDefault();
+    const value = Number(amount.value);
+    if (!Number.isFinite(value) || value <= 0) {
+      status.textContent = "Enter a positive amount.";
+      return;
+    }
+    await createAndReload(status, "/wallet/credits", { amount: value });
+  } },
+    el("div", {}, el("label", { for: "credit-amount", text: "Add credits (USD)" }), amount),
+    el("div", { class: "actions" },
+      el("button", { type: "submit", class: "primary", text: "Add credits" }), status)));
+}
+
+// Each installation owns a repository checkbox list; a failed list is its own
+// inline note so one broken installation does not hide the others.
+async function repositoriesSection(box, installation) {
+  const label = installation.accountLogin || String(installation.id);
+  try {
+    const res = await api("/github/installations/" + encodeURIComponent(installation.id) + "/repositories");
+    const repositories = Array.isArray(res) ? res : (res.repositories || []);
+    const status = el("p", { class: "muted", text: "" });
+    box.append(el("div", {},
+      el("h3", { class: "section-title", text: "Repositories for " + label }),
+      repositories.length
+        ? el("div", { class: "grid-form" }, repositories.map((entry) => {
+            const repo = typeof entry === "string" ? entry : (entry.repo || entry.name || "");
+            const toggle = el("input", { type: "checkbox", checked: typeof entry === "string" ? false : entry.enabled !== false });
+            toggle.addEventListener("change", async () => {
+              toggle.disabled = true;
+              try {
+                await api("/github/repositories", { method: "PATCH", body: JSON.stringify({ installationId: installation.id, repo, enabled: toggle.checked }) });
+                status.textContent = repo + (toggle.checked ? " enabled." : " disabled.");
+              } catch (err) {
+                status.textContent = "Could not update " + repo + ": " + apiErrorMessage(err);
+              }
+              toggle.disabled = false;
+            });
+            return el("label", { class: "check" }, toggle, el("span", { text: repo }));
+          }))
+        : el("p", { class: "muted", text: "No repositories reported for this installation." }),
+      status));
+  } catch (err) {
+    box.append(el("div", { class: "note-box" },
+      el("p", { text: "Could not load repositories for " + label + ": " + apiErrorMessage(err) })));
+  }
+}
+
+async function githubSection(box) {
+  box.append(el("h3", { class: "section-title", text: "GitHub App" }));
+  let installations;
+  try {
+    installations = await api("/github/installations");
+  } catch (err) {
+    box.append(endpointNote(err));
+    installations = [];
+  }
+  const list = Array.isArray(installations) ? installations : [];
+  box.append(list.length
+    ? dataTable(["Account", "Type", "Selection", "Unlink"],
+        list.map((i) => [
+          el("span", {}, el("code", { text: i.accountLogin || "" }), " #" + i.id),
+          orDash(i.accountType),
+          orDash(i.repositorySelection),
+          el("button", { type: "button", text: "Unlink", onclick: async () => {
+            try {
+              await api("/github/installations/" + encodeURIComponent(i.id), { method: "DELETE" });
+            } catch (err) {
+              box.append(el("p", { class: "muted", text: "Could not unlink " + i.id + ": " + apiErrorMessage(err) }));
+              return;
+            }
+            await route();
+          } }),
+        ]))
+    : el("p", { class: "muted", text: "No GitHub App installation is linked to this workspace." }));
+  for (const installation of list) await repositoriesSection(box, installation);
+
+  const id = el("input", { id: "gh-id", type: "number", min: "1", required: true, placeholder: "12345678" });
+  const login = el("input", { id: "gh-login", required: true, placeholder: "acme" });
+  const type = el("select", { id: "gh-type" },
+    el("option", { value: "User", text: "User" }),
+    el("option", { value: "Organization", text: "Organization" }));
+  const selection = el("select", { id: "gh-selection" },
+    el("option", { value: "all", text: "all" }),
+    el("option", { value: "selected", text: "selected" }));
+  box.append(el("h3", { class: "section-title", text: "Link a GitHub App installation" }));
+  const status = el("p", { class: "muted", text: "" });
+  box.append(el("form", { class: "grid-form", onsubmit: async (event) => {
+    event.preventDefault();
+    const installationId = Number(id.value);
+    if (!Number.isInteger(installationId) || installationId <= 0) {
+      status.textContent = "Installation id must be a positive integer.";
+      return;
+    }
+    // freedas-control reads camelCase; the snake_case names ride along so
+    // either body shape deserializes.
+    await createAndReload(status, "/github/installations", {
+      id: installationId,
+      account_login: login.value.trim(),
+      accountLogin: login.value.trim(),
+      account_type: type.value,
+      accountType: type.value,
+      repository_selection: selection.value,
+      repositorySelection: selection.value,
+    });
+  } },
+    el("div", {}, el("label", { for: "gh-id", text: "Installation id" }), id),
+    el("div", {}, el("label", { for: "gh-login", text: "Account login" }), login),
+    el("div", {}, el("label", { for: "gh-type", text: "Account type" }), type),
+    el("div", {}, el("label", { for: "gh-selection", text: "Repository selection" }), selection),
+    el("div", { class: "actions" },
+      el("button", { type: "submit", class: "primary", text: "Link installation" }), status)));
+}
+
+async function membersSection(box, base) {
+  box.append(el("h3", { class: "section-title", text: "Members" }));
+  let members;
+  try {
+    members = await api(base + "/members");
+  } catch (err) {
+    box.append(endpointNote(err));
+    members = null;
+  }
+  const status = el("p", { class: "muted", text: "" });
+  if (members) {
+    box.append(members.length
+      ? dataTable(["Email", "Name", "Role", "Save", "Remove"],
+          members.map((m) => {
+            const select = el("select", {}, ["owner", "admin", "member"].map((role) => el("option", { value: role, text: role })));
+            select.value = m.role;
+            return [
+              m.email,
+              orDash(m.name),
+              select,
+              el("button", { type: "button", text: "Save", onclick: async () => {
+                status.textContent = "Saving " + m.email + "…";
+                try {
+                  await api(base + "/members/" + encodeURIComponent(m.id), { method: "PATCH", body: JSON.stringify({ role: select.value }) });
+                } catch (err) {
+                  status.textContent = "Could not change " + m.email + ": " + apiErrorMessage(err);
+                  return;
+                }
+                await route();
+              } }),
+              el("button", { type: "button", text: "Remove", onclick: async () => {
+                status.textContent = "Removing " + m.email + "…";
+                try {
+                  await api(base + "/members/" + encodeURIComponent(m.id), { method: "DELETE" });
+                } catch (err) {
+                  status.textContent = "Could not remove " + m.email + ": " + apiErrorMessage(err);
+                  return;
+                }
+                await route();
+              } }),
+            ];
+          }))
+      : el("p", { class: "muted", text: "No members yet." }));
+  }
+  box.append(status);
+  const email = el("input", { id: "member-email", type: "email", required: true, placeholder: "teammate@example.com" });
+  const role = el("select", { id: "member-role" }, ["owner", "admin", "member"].map((r) => el("option", { value: r, text: r })));
+  box.append(el("form", { class: "grid-form", onsubmit: async (event) => {
+    event.preventDefault();
+    await createAndReload(status, base + "/members", { email: email.value.trim(), role: role.value });
+  } },
+    el("div", {}, el("label", { for: "member-email", text: "Invite by email" }), email),
+    el("div", {}, el("label", { for: "member-role", text: "Role" }), role),
+    el("div", { class: "actions" }, el("button", { type: "submit", class: "primary", text: "Add member" }))));
+}
+
+function teamCreate(box, base) {
+  const name = el("input", { id: "team-name", required: true, placeholder: "Platform" });
+  const status = el("p", { class: "muted", text: "" });
+  box.append(el("form", { class: "grid-form", onsubmit: async (event) => {
+    event.preventDefault();
+    await createAndReload(status, base + "/teams", { name: name.value.trim() });
+  } },
+    el("div", {}, el("label", { for: "team-name", text: "New team" }), name),
+    el("div", { class: "actions" },
+      el("button", { type: "submit", class: "primary", text: "Create team" }), status)));
+}
+
+function budgetCreate(box, base) {
+  const scope = el("select", { id: "budget-scope" }, ["workspace", "user", "team"].map((s) => el("option", { value: s, text: s })));
+  const subject = el("input", { id: "budget-subject", placeholder: "user or team id (blank for workspace)" });
+  const limit = el("input", { id: "budget-limit", type: "number", min: "0.01", step: "0.01", required: true, placeholder: "50.00" });
+  const period = el("select", { id: "budget-period" }, ["monthly", "total"].map((p) => el("option", { value: p, text: p })));
+  box.append(el("h3", { class: "section-title", text: "New budget" }));
+  const status = el("p", { class: "muted", text: "" });
+  box.append(el("form", { class: "grid-form", onsubmit: async (event) => {
+    event.preventDefault();
+    const value = Number(limit.value);
+    if (!Number.isFinite(value) || value <= 0) {
+      status.textContent = "Limit must be a positive amount.";
+      return;
+    }
+    await createAndReload(status, base + "/budgets", {
+      scope: scope.value,
+      subject_id: subject.value.trim(),
+      subjectId: subject.value.trim(),
+      limit_usd: value,
+      limitUsd: value,
+      period: period.value,
+    });
+  } },
+    el("div", {}, el("label", { for: "budget-scope", text: "Scope" }), scope),
+    el("div", {}, el("label", { for: "budget-subject", text: "Subject id" }), subject),
+    el("div", {}, el("label", { for: "budget-limit", text: "Limit (USD)" }), limit),
+    el("div", {}, el("label", { for: "budget-period", text: "Period" }), period),
+    el("div", { class: "actions" },
+      el("button", { type: "submit", class: "primary", text: "Create budget" }), status)));
+}
+
+async function workspaceSettingsSection(box) {
+  box.append(el("h3", { class: "section-title", text: "Workspace settings" }));
+  let settings;
+  try {
+    settings = await api("/workspace/settings");
+  } catch (err) {
+    box.append(endpointNote(err));
+    return;
+  }
+  const sandboxes = (settings && settings.sandboxes) || {};
+  const enabled = el("input", { id: "ws-sandboxes" });
+  enabled.checked = sandboxes.enabled === true;
+  const rate = el("input", { id: "ws-rate", type: "number", min: "0", step: "0.000001", value: sandboxes.computeRateUsd ?? "" });
+  const minutes = el("input", { id: "ws-minutes", type: "number", min: "1", step: "1", value: sandboxes.sessionLimitMinutes ?? "" });
+  const sso = el("input", { id: "ws-sso" });
+  sso.checked = settings && settings.sso_required === true;
+  const status = el("p", { class: "muted", text: "" });
+  box.append(el("form", { class: "grid-form", onsubmit: async (event) => {
+    event.preventDefault();
+    status.textContent = "Saving…";
+    try {
+      const saved = await api("/workspace/settings", { method: "PATCH", body: JSON.stringify({
+        sandboxes: {
+          enabled: enabled.checked,
+          computeRateUsd: rate.value === "" ? null : Number(rate.value),
+          sessionLimitMinutes: minutes.value === "" ? null : Number(minutes.value),
+        },
+        sso_required: sso.checked,
+      }) });
+      status.textContent = "Saved. Stored settings: " + JSON.stringify(saved);
+    } catch (err) {
+      status.textContent = "Save failed: " + apiErrorMessage(err);
+    }
+  } },
+    el("label", { class: "check" }, enabled, el("span", { text: "Cloud sandboxes enabled" })),
+    el("div", {}, el("label", { for: "ws-rate", text: "Compute rate (USD per second)" }), rate),
+    el("div", {}, el("label", { for: "ws-minutes", text: "Session limit (minutes)" }), minutes),
+    el("label", { class: "check" }, sso, el("span", { text: "Require SSO" })),
+    el("div", { class: "actions" },
+      el("button", { type: "submit", class: "primary", text: "Save settings" }), status)));
+}
+
+PAGES["/workspaces"] = async (root) => {
+  const box = page(root, state.orgSlug ? "Organization: " + state.orgSlug : "Workspaces",
+    "Workspaces, roles, budgets, and the wallet come from freedas-control.");
+  tokenBar(box);
+  let workspaces;
+  try {
+    workspaces = await api("/workspaces");
+  } catch (err) {
+    box.append(endpointNote(err));
+    return;
+  }
+  const list = Array.isArray(workspaces) ? workspaces : (workspaces.rows || workspaces.data || [workspaces]);
+  box.append(el("h3", { class: "section-title", text: "Workspaces" }));
+  box.append(list.length
+    ? dataTable(["Slug", "Name", "Kind", "Role"],
+        list.map((w) => [el("code", { text: w.slug }), w.name, w.kind, w.role]))
+    : el("p", { class: "muted", text: "No workspaces reported." }));
+  await walletSection(box);
+  const slug = state.orgSlug || (list[0] && list[0].slug) || "";
+  if (controlToken()) {
+    if (slug) {
+      const base = "/workspaces/" + encodeURIComponent(slug);
+      await githubSection(box);
+      await membersSection(box, base);
+      await orgSection(box, "Teams", base + "/teams", ["Name", "Members"],
+        (t) => [t.name, String(t.memberCount ?? "—")]);
+      teamCreate(box, base);
+      await orgSection(box, "Budgets", base + "/budgets", ["Scope", "Subject", "Limit", "Spent", "Remaining"],
+        (b) => [b.scope, b.subjectId || "—", usd(b.limitUsd), usd(b.spentUsd), usd(b.remainingUsd)]);
+      budgetCreate(box, base);
+      await workspaceSettingsSection(box);
+      await orgSection(box, "Invoices", base + "/invoices", ["Period", "Total"],
+        (i) => [dateShort(i.periodStart) + " – " + dateShort(i.periodEnd), usd(i.totalUsd)]);
+      await orgSection(box, "Usage by day", "/usage/summary", ["Day", "Model", "Tokens", "Cost"],
+        (u) => [u.day, u.model, ((u.inputTokens || 0) + (u.outputTokens || 0)).toLocaleString(), usd(u.costUsd)],
+        (res) => (res && res.days) || []);
+    }
+    await tokenSection(box);
+  }
+};
+
+PAGES["/relay"] = async (root) => {
+  let machines, sessions;
+  try {
+    [machines, sessions] = await Promise.all([api("/machines"), api("/sessions")]);
+    if (!Array.isArray(machines) || !Array.isArray(sessions)) throw new Error("unexpected relay response");
+  } catch (err) {
+    notePage(root, "Relay", [
+      "Not available on this local server. Remote control is provided by `freedas relay start` against `freedas-relay-server`, and freedas-server exposes no relay API.",
+      "`freedas relay status` reports the daemon state.",
+    ]);
+    return;
+  }
+  const box = page(root, "Relay", "Machines and shared sessions served by freedas-relay-server on this origin.");
+  box.append(el("h3", { class: "section-title", text: "Machines" }));
+  box.append(machines.length
+    ? dataTable(["Machine", "Scope", "Sessions"],
+        machines.map((m) => [el("code", { text: m.machineID }), m.scope || "—", String(m.sessions ?? "—")]))
+    : el("p", { class: "muted", text: "No machines are connected. Start `freedas relay start` to expose this machine." }));
+  box.append(el("h3", { class: "section-title", text: "Sessions" }));
+  if (!sessions.length) {
+    box.append(el("p", { class: "muted", text: "No sessions are shared. Share one with `freedas relay share <sessionID>`." }));
+    return;
+  }
+  box.append(dataTable(["Session", "Machine"],
+    sessions.map((s) => [
+      el("a", { href: "#/relay/" + encodeURIComponent(s.sessionID) }, el("code", { text: s.sessionID })),
+      el("code", { text: s.machineID }),
+    ])));
+  sessions.forEach((s, index) => {
+    const input = el("input", { id: "relay-prompt-" + index, placeholder: "Prompt this session" });
+    const status = el("span", { class: "muted", text: "" });
+    const send = el("button", { type: "submit", class: "primary", text: "Send" });
+    const stop = el("button", { type: "button", text: "Stop", onclick: async () => {
+      stop.disabled = true;
+      status.textContent = "Stopping…";
+      try {
+        await api("/sessions/" + encodeURIComponent(s.sessionID) + "/abort", { method: "POST", body: "{}" });
+        status.textContent = "Stop sent.";
+      } catch (err) {
+        status.textContent = "Stop failed: " + err.message;
+        stop.disabled = false;
+      }
+    } });
+    box.append(el("form", { class: "grid-form", onsubmit: async (event) => {
+      event.preventDefault();
+      const text = input.value.trim();
+      if (!text) { input.focus(); return; }
+      send.disabled = true;
+      status.textContent = "Sending…";
+      try {
+        await api("/sessions/" + encodeURIComponent(s.sessionID) + "/prompt", { method: "POST", body: JSON.stringify({ text }) });
+        input.value = "";
+        status.textContent = "Prompt sent.";
+      } catch (err) {
+        status.textContent = "Send failed: " + err.message;
+      }
+      send.disabled = false;
+    } },
+      el("div", {},
+        el("label", { for: "relay-prompt-" + index, text: "Prompt " + s.sessionID }),
+        input),
+      el("div", { class: "actions" }, send, stop, status)));
+  });
+};
+
+// The relay session page owns one EventSource; a new route closes it. The
+// generation counter stops a probe that resolves after navigation from
+// re-opening the stream.
+let relaySource = null;
+let relayRun = 0;
+function closeRelayStream() {
+  relayRun += 1;
+  if (relaySource) {
+    relaySource.close();
+    relaySource = null;
+  }
+}
+
+PAGES["/relay-session"] = async (root, id) => {
+  const box = page(root, "Relay session", "A shared session served by freedas-relay-server on this origin.");
+  box.append(el("p", { class: "muted" }, el("a", { href: "#/relay", text: "Back to relay" })));
+  let machine = "—";
+  try {
+    const sessions = await api("/sessions");
+    const match = (Array.isArray(sessions) ? sessions : []).find((s) => s.sessionID === id);
+    if (match) machine = match.machineID;
+  } catch (err) {
+    box.append(el("p", { class: "muted", text: "Could not load shared sessions: " + apiErrorMessage(err) }));
+  }
+  box.append(el("dl", { class: "kv" },
+    el("dt", { text: "session" }), el("dd", { text: id }),
+    el("dt", { text: "machine" }), el("dd", { text: machine })));
+  const transcript = el("div", { class: "transcript relay-transcript", role: "log", "aria-live": "polite", "aria-relevant": "additions" });
+  const liveStatus = el("p", { class: "muted", text: "Checking for live events…" });
+  box.append(el("h3", { class: "section-title", text: "Transcript" }), liveStatus, transcript);
+  const appendLine = (text) => {
+    const atBottom = transcript.scrollTop + transcript.clientHeight >= transcript.scrollHeight - 8;
+    transcript.append(el("p", { text }));
+    while (transcript.children.length > 200) transcript.firstElementChild.remove();
+    if (atBottom) transcript.scrollTop = transcript.scrollHeight;
+  };
+  const run = relayRun;
+  (async () => {
+    const token = controlToken();
+    // Only freedas-relay-server serves /events; say so instead of reconnect-looping.
+    try {
+      const probe = await fetch(token ? "/events?token=" + encodeURIComponent(token) : "/events", { headers: { accept: "text/event-stream" } });
+      const live = probe.ok && (probe.headers.get("content-type") || "").includes("text/event-stream");
+      probe.body?.cancel();
+      if (!live) {
+        liveStatus.textContent = "Live events are not available on this server.";
+        return;
+      }
+    } catch (err) {
+      liveStatus.textContent = "Live events are not available on this server.";
+      return;
+    }
+    if (run !== relayRun) return;
+    liveStatus.textContent = "Waiting for events…";
+    const es = new EventSource(token ? "/events?token=" + encodeURIComponent(token) : "/events");
+    relaySource = es;
+    es.onopen = () => { liveStatus.textContent = "Live."; };
+    es.onerror = () => { liveStatus.textContent = "Reconnecting…"; };
+    es.onmessage = (msg) => {
+      let frame;
+      try { frame = JSON.parse(msg.data); } catch { return; }
+      if (!frame || frame.sessionID !== id) return;
+      const event = frame.event || {};
+      if (event.type !== "message.part.updated") return;
+      const part = event.part || {};
+      const data = part.data || {};
+      if (part.kind === "text" && typeof data.text === "string" && data.text) appendLine(data.text);
+      else if (typeof data.tool === "string") appendLine("[tool] " + data.tool);
+    };
+  })();
+  box.append(el("h3", { class: "section-title", text: "Usage" }));
+  try {
+    const summary = await api("/sessions/" + encodeURIComponent(id) + "/summary");
+    box.append(dataTable(["Input tokens", "Output tokens", "Cost"],
+      [[String(summary.inputTokens ?? 0), String(summary.outputTokens ?? 0), usd(summary.costUsd)]]));
+  } catch (err) {
+    box.append(el("p", { class: "muted", text: "Could not load usage: " + apiErrorMessage(err) }));
+  }
+  const input = el("input", { id: "relay-page-prompt", placeholder: "Prompt this session" });
+  const sendStatus = el("p", { class: "muted", text: "" });
+  const send = el("button", { type: "submit", class: "primary", text: "Send" });
+  box.append(el("h3", { class: "section-title", text: "Prompt" }));
+  box.append(el("form", { class: "grid-form", onsubmit: async (event) => {
+    event.preventDefault();
+    const text = input.value.trim();
+    if (!text) { input.focus(); return; }
+    send.disabled = true;
+    sendStatus.textContent = "Sending…";
+    try {
+      await api("/sessions/" + encodeURIComponent(id) + "/prompt", { method: "POST", body: JSON.stringify({ text }) });
+      input.value = "";
+      sendStatus.textContent = "Prompt sent.";
+    } catch (err) {
+      sendStatus.textContent = "Send failed: " + apiErrorMessage(err);
+    }
+    send.disabled = false;
+  } },
+    el("div", {}, el("label", { for: "relay-page-prompt", text: "Prompt" }), input),
+    el("div", { class: "actions" }, send, sendStatus)));
+  const stopStatus = el("p", { class: "muted", text: "The run stops after the current step." });
+  const stop = el("button", { type: "button", text: "Stop run", onclick: async () => {
+    stop.disabled = true;
+    stopStatus.textContent = "Stopping…";
+    try {
+      await api("/sessions/" + encodeURIComponent(id) + "/abort", { method: "POST", body: "{}" });
+      stopStatus.textContent = "Stop sent.";
+    } catch (err) {
+      stopStatus.textContent = "Stop failed: " + apiErrorMessage(err);
+      stop.disabled = false;
+    }
+  } });
+  box.append(el("div", { class: "actions" }, stop, stopStatus));
+};
+
+function parseRoute() {
+  const raw = (location.hash || "#/").replace(/^#/, "") || "/";
+  const path = raw.split("?")[0];
+  if (path.startsWith("/session/")) {
+    const id = safeDecode(path.slice("/session/".length));
+    if (id) return { route: "/session", id };
+  }
+  if (path.startsWith("/relay/")) {
+    const id = safeDecode(path.slice("/relay/".length));
+    if (id) return { route: "/relay-session", id };
+  }
+  return { route: ROUTE_NAMES.includes(path) ? path : "/", id: null };
+}
+
+async function route() {
+  closeRelayStream();
+  const { route: name, id } = parseRoute();
+  const navRoute = name === "/session" ? "/" : name === "/relay-session" ? "/relay" : name;
+  const label = name === "/relay-session" ? "relay" : name.slice(1);
+  document.title = "Freedas: " + (navRoute === "/" ? "session workspace" : navRoute.slice(1));
+  for (const link of document.querySelectorAll("[data-route]")) {
+    if (link.dataset.route === navRoute) link.setAttribute("aria-current", "page");
+    else link.removeAttribute("aria-current");
+  }
+  if (name === "/" || name === "/session") {
+    $("workspace").hidden = false;
+    $("page").hidden = true;
+    if (id) {
+      if (id !== state.current) await selectSession(id);
+    } else if (!state.current && state.sessions.length) {
+      await selectSession(state.sessions[0].id);
+    } else if (!state.sessions.length) {
+      $("session-empty").hidden = false;
+    }
+    return;
+  }
+  $("workspace").hidden = true;
+  $("page").hidden = false;
+  loadingPage($("page"), label);
+  try {
+    await PAGES[name]($("page"), id);
+  } catch (err) {
+    pageFailure($("page"), label, err, () => route());
+  }
+}
+
+window.addEventListener("hashchange", () => { route(); });
+window.addEventListener("pagehide", closeRelayStream);
+
+(async function init() {
+  try {
+    const health = await api("/global/health");
+    $("version").textContent = "v" + health.version;
+  } catch { /* version is optional */ }
+  await loadAgents();
+  await loadSessions();
+  await route();
+  probeEvents().then(connect);
+})();
+</script>
+</body>
+</html>

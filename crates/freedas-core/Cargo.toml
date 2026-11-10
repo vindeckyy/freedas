@@ -1,0 +1,22 @@
+[package]
+name = "freedas-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+ulid.workspace = true
+time.workspace = true
+jsonc-parser.workspace = true
+secrecy.workspace = true
+regex.workspace = true
+rusqlite.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

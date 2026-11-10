@@ -1,0 +1,16 @@
+* text=auto eol=lf
+*.rs text diff=rust
+*.toml text diff=toml
+*.lock text
+*.md text
+*.sh text eol=lf
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.ico binary
+*.wasm binary
+*.jar binary
+*.zip binary
+*.tar.gz binary

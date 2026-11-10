@@ -1,0 +1,10 @@
+Freedas
+Copyright 2026 the Freedas contributors
+
+This product includes third-party code and data under the terms of the
+Apache License 2.0 unless otherwise noted. Licenses for dependencies are
+available in their respective upstream repositories.
+
+Freedas was independently implemented in Rust from the public product
+documentation of the hosted Midas agent. No Midas source code is included
+in this repository.

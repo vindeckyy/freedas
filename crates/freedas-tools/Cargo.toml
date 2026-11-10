@@ -1,0 +1,28 @@
+[package]
+name = "freedas-tools"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+freedas-core = { path = "../freedas-core" }
+freedas-permission = { path = "../freedas-permission" }
+freedas-sandbox = { path = "../freedas-sandbox" }
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+async-trait.workspace = true
+tempfile.workspace = true
+globset.workspace = true
+ignore.workspace = true
+ulid.workspace = true
+regex.workspace = true
+freedas-provider = { path = "../freedas-provider" }
+reqwest.workspace = true
+html2md = "0.2"
+freedas-skill = { path = "../freedas-skill" }
+freedas-db = { path = "../freedas-db" }
+freedas-lsp = { path = "../freedas-lsp" }
+chromiumoxide.workspace = true
+futures.workspace = true

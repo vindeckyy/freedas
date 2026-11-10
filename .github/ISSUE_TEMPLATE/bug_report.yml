@@ -1,0 +1,46 @@
+name: Bug report
+description: Report incorrect behavior in freedas
+labels: [bug]
+body:
+  - type: input
+    id: version
+    attributes:
+      label: freedas version
+      description: Output of `freedas --version`
+      placeholder: "freedas 0.1.0"
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: OS and architecture
+      placeholder: "macOS 27.2 arm64, Ubuntu 24.04 x86_64, or WSL distro"
+    validations:
+      required: true
+  - type: textarea
+    id: command
+    attributes:
+      label: Command run
+      description: The exact command and flags that triggered the bug
+      placeholder: "freedas run \"<task>\" --format json"
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Sanitized logs
+      description: Relevant output or `freedas debug` output. Redact API keys, tokens, file paths outside the project, and any secret values.
+    validations:
+      required: true
