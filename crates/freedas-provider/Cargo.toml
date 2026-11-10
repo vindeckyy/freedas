@@ -17,7 +17,7 @@ tokio-util.workspace = true
 reqwest.workspace = true
 uuid = { version = "1", features = ["v4"] }
 base64 = "0.22"
-sha2 = "0.10"
+sha2 = "0.11"
 rand = "0.8"
 eventsource-stream.workspace = true
 secrecy.workspace = true

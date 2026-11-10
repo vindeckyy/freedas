@@ -13,7 +13,7 @@ rquickjs = "0.14"
 reqwest.workspace = true
 tar = "0.4"
 flate2 = "1"
-sha2 = "0.10"
+sha2 = "0.11"
 base64 = "0.22"
 wasmtime = { version = "39", default-features = false, features = [
     "component-model",

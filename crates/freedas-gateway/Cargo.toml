@@ -24,7 +24,7 @@ reqwest.workspace = true
 tracing.workspace = true
 ulid.workspace = true
 time.workspace = true
-sha2 = "0.10"
+sha2 = "0.11"
 hex = "0.4"
 sqlx = { version = "0.8", default-features = false, features = ["postgres", "runtime-tokio-rustls", "tls-rustls-ring"] }
 
