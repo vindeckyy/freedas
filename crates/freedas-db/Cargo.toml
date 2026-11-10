@@ -1,0 +1,18 @@
+[package]
+name = "freedas-db"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+freedas-core = { path = "../freedas-core" }
+rusqlite.workspace = true
+ulid.workspace = true
+
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

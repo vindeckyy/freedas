@@ -1,0 +1,120 @@
+# cargo-deny configuration for the Freedas workspace.
+# Run with: cargo deny check
+
+[advisories]
+version = 2
+yanked = "deny"
+ignore = []
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+highlight = "all"
+skip = []
+skip-tree = []
+deny = []
+
+[licenses]
+version = 2
+allow = [
+  "Apache-2.0",
+  "MIT",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "ISC",
+  "Unicode-3.0",
+  "Unicode-DFS-2016",
+  "Zlib",
+  "MPL-2.0",
+  # Root CA bundles shipped with rustls are certified under CDLA-Permissive.
+  "CDLA-Permissive-2.0",
+]
+confidence-threshold = 0.8
+
+# These crates use the pre-SPDX `MIT/Apache-2.0` (and friends) spelling in
+# their `license` field; clarify them as the same permissive dual license.
+clarify = [
+  { name = "arraydeque", version = "*", expression = "MIT OR Apache-2.0" },
+  { name = "atomic", version = "*", expression = "MIT OR Apache-2.0" },
+  { name = "bit-set", version = "*", expression = "MIT OR Apache-2.0" },
+  { name = "bit-vec", version = "*", expression = "MIT OR Apache-2.0" },
+  { name = "bitflags", version = "*", expression = "MIT OR Apache-2.0" },
+  { name = "bs58", version = "*", expression = "MIT OR Apache-2.0" },
+  { name = "core_detect", version = "*", expression = "MIT OR Apache-2.0" },
+  { name = "fallible-iterator", version = "*", expression = "MIT OR Apache-2.0" },
+  { name = "fallible-streaming-iterator", version = "*", expression = "MIT OR Apache-2.0" },
+  { name = "filetime", version = "*", expression = "MIT OR Apache-2.0" },
+  { name = "fixedbitset", version = "*", expression = "MIT OR Apache-2.0" },
+  { name = "futures-timer", version = "*", expression = "MIT OR Apache-2.0" },
+  { name = "id-arena", version = "*", expression = "MIT OR Apache-2.0" },
+  { name = "ident_case", version = "*", expression = "MIT OR Apache-2.0" },
+  { name = "memmem", version = "*", expression = "MIT OR Apache-2.0" },
+  { name = "minimal-lexical", version = "*", expression = "MIT OR Apache-2.0" },
+  { name = "plain", version = "*", expression = "MIT OR Apache-2.0" },
+  { name = "serde_urlencoded", version = "*", expression = "MIT OR Apache-2.0" },
+  { name = "signal-hook", version = "*", expression = "MIT OR Apache-2.0" },
+  { name = "stringprep", version = "*", expression = "MIT OR Apache-2.0" },
+  { name = "vcpkg", version = "*", expression = "MIT OR Apache-2.0" },
+  { name = "version_check", version = "*", expression = "MIT OR Apache-2.0" },
+  { name = "winapi", version = "*", expression = "MIT OR Apache-2.0" },
+  { name = "winapi-i686-pc-windows-gnu", version = "*", expression = "MIT OR Apache-2.0" },
+  { name = "winapi-x86_64-pc-windows-gnu", version = "*", expression = "MIT OR Apache-2.0" },
+  { name = "wiremock", version = "*", expression = "MIT OR Apache-2.0" },
+  { name = "fnv", version = "*", expression = "Apache-2.0 OR MIT" },
+  { name = "same-file", version = "*", expression = "Unlicense OR MIT" },
+  { name = "walkdir", version = "*", expression = "Unlicense OR MIT" },
+]
+
+# Per-crate exceptions for crates whose `license` field is allowed only here.
+exceptions = [
+  # `html2md` is GPL-3.0+; it is used only by `freedas-tools::webfetch` for
+  # HTML->Markdown conversion. Remove this exception if the dependency is
+  # replaced with an MIT/Apache-2.0 implementation.
+  { name = "html2md", version = "*", allow = ["GPL-3.0+"] },
+  # `terminfo` (terminal capability strings) is WTFPL.
+  { name = "terminfo", version = "*", allow = ["WTFPL"] },
+  # wasmtime/cranelift are `Apache-2.0 WITH LLVM-exception`; the exception is a
+  # patent-grant addendum and is acceptable for binary use.
+  { name = "ar_archive_writer", version = "*", allow = ["Apache-2.0"], exceptions = ["LLVM-exception"] },
+  { name = "cranelift-assembler-x64", version = "*", allow = ["Apache-2.0"], exceptions = ["LLVM-exception"] },
+  { name = "cranelift-assembler-x64-meta", version = "*", allow = ["Apache-2.0"], exceptions = ["LLVM-exception"] },
+  { name = "cranelift-bforest", version = "*", allow = ["Apache-2.0"], exceptions = ["LLVM-exception"] },
+  { name = "cranelift-bitset", version = "*", allow = ["Apache-2.0"], exceptions = ["LLVM-exception"] },
+  { name = "cranelift-codegen", version = "*", allow = ["Apache-2.0"], exceptions = ["LLVM-exception"] },
+  { name = "cranelift-codegen-meta", version = "*", allow = ["Apache-2.0"], exceptions = ["LLVM-exception"] },
+  { name = "cranelift-codegen-shared", version = "*", allow = ["Apache-2.0"], exceptions = ["LLVM-exception"] },
+  { name = "cranelift-control", version = "*", allow = ["Apache-2.0"], exceptions = ["LLVM-exception"] },
+  { name = "cranelift-entity", version = "*", allow = ["Apache-2.0"], exceptions = ["LLVM-exception"] },
+  { name = "cranelift-frontend", version = "*", allow = ["Apache-2.0"], exceptions = ["LLVM-exception"] },
+  { name = "cranelift-isle", version = "*", allow = ["Apache-2.0"], exceptions = ["LLVM-exception"] },
+  { name = "cranelift-native", version = "*", allow = ["Apache-2.0"], exceptions = ["LLVM-exception"] },
+  { name = "cranelift-srcgen", version = "*", allow = ["Apache-2.0"], exceptions = ["LLVM-exception"] },
+  { name = "pulley-interpreter", version = "*", allow = ["Apache-2.0"], exceptions = ["LLVM-exception"] },
+  { name = "pulley-macros", version = "*", allow = ["Apache-2.0"], exceptions = ["LLVM-exception"] },
+  { name = "regalloc2", version = "*", allow = ["Apache-2.0"], exceptions = ["LLVM-exception"] },
+  { name = "target-lexicon", version = "*", allow = ["Apache-2.0"], exceptions = ["LLVM-exception"] },
+  { name = "wasmtime", version = "*", allow = ["Apache-2.0"], exceptions = ["LLVM-exception"] },
+  { name = "wasmtime-environ", version = "*", allow = ["Apache-2.0"], exceptions = ["LLVM-exception"] },
+  { name = "wasmtime-internal-component-macro", version = "*", allow = ["Apache-2.0"], exceptions = ["LLVM-exception"] },
+  { name = "wasmtime-internal-component-util", version = "*", allow = ["Apache-2.0"], exceptions = ["LLVM-exception"] },
+  { name = "wasmtime-internal-cranelift", version = "*", allow = ["Apache-2.0"], exceptions = ["LLVM-exception"] },
+  { name = "wasmtime-internal-fiber", version = "*", allow = ["Apache-2.0"], exceptions = ["LLVM-exception"] },
+  { name = "wasmtime-internal-jit-debug", version = "*", allow = ["Apache-2.0"], exceptions = ["LLVM-exception"] },
+  { name = "wasmtime-internal-jit-icache-coherence", version = "*", allow = ["Apache-2.0"], exceptions = ["LLVM-exception"] },
+  { name = "wasmtime-internal-math", version = "*", allow = ["Apache-2.0"], exceptions = ["LLVM-exception"] },
+  { name = "wasmtime-internal-slab", version = "*", allow = ["Apache-2.0"], exceptions = ["LLVM-exception"] },
+  { name = "wasmtime-internal-unwinder", version = "*", allow = ["Apache-2.0"], exceptions = ["LLVM-exception"] },
+  { name = "wasmtime-internal-versioned-export-macros", version = "*", allow = ["Apache-2.0"], exceptions = ["LLVM-exception"] },
+  { name = "wasmtime-internal-winch", version = "*", allow = ["Apache-2.0"], exceptions = ["LLVM-exception"] },
+  { name = "wasmtime-internal-wit-bindgen", version = "*", allow = ["Apache-2.0"], exceptions = ["LLVM-exception"] },
+  { name = "winch-codegen", version = "*", allow = ["Apache-2.0"], exceptions = ["LLVM-exception"] },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []
+
+[output]
+feature-depth = 1

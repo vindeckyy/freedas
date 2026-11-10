@@ -1,0 +1,89 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/freedas",
+    "crates/freedas-core",
+    "crates/freedas-db",
+    "crates/freedas-provider",
+    "crates/freedas-catalog",
+    "crates/freedas-router",
+    "crates/freedas-session",
+    "crates/freedas-tools",
+    "crates/freedas-permission",
+    "crates/freedas-sandbox",
+    "crates/freedas-agent",
+    "crates/freedas-skill",
+    "crates/freedas-mcp",
+    "crates/freedas-plugin",
+    "crates/freedas-memory",
+    "crates/freedas-sync",
+    "crates/freedas-standards",
+    "crates/freedas-git",
+    "crates/freedas-lsp",
+    "crates/freedas-tui",
+    "crates/freedas-server",
+    "crates/freedas-web", # static SPA lib served by freedas-server; keep in members so workspace build/test cover it
+    "crates/freedas-acp",
+    "crates/freedas-relay",
+    "crates/freedas-relay-server",
+    "crates/freedas-review",
+    "crates/freedas-sandbox-runner",
+    "crates/freedas-control",
+    "crates/freedas-gateway",
+    "crates/freedas-bench",
+    "crates/freedas-test-support",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+repository = "https://github.com/freedas/freedas"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+
+[workspace.dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "process", "signal", "fs", "io-util", "net"] }
+tokio-util = { version = "0.7", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+clap = { version = "4", features = ["derive"] }
+thiserror = "2"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+ulid = "1"
+time = { version = "0.3", features = ["formatting", "macros", "serde"] }
+jsonc-parser = { version = "0.34", features = ["serde"] }
+rusqlite = { version = "0.41", features = ["bundled", "functions"] }
+async-trait = "0.1"
+futures = "0.3"
+reqwest = { version = "0.12", features = ["json", "stream", "rustls-tls"], default-features = false }
+eventsource-stream = "0.2"
+secrecy = "0.10"
+regex = "1"
+globset = "0.4"
+unicode-width = "0.2"
+ignore = "0.4"
+axum = "0.8"
+utoipa = { version = "6", features = ["axum_extras"] }
+ratatui = "0.30"
+crossterm = "0.29"
+pulldown-cmark = "0.13"
+chromiumoxide = "0.9"
+tempfile = "3"
+insta = "1"
+
+[workspace.metadata.dist]
+cargo-dist-version = "0.34"
+installers = ["shell"]
+targets = [
+    "aarch64-apple-darwin",
+    "x86_64-apple-darwin",
+    "aarch64-unknown-linux-gnu",
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-musl",
+    "x86_64-unknown-linux-musl",
+]
+install-updater = false

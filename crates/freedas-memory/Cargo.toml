@@ -1,0 +1,12 @@
+[package]
+name = "freedas-memory"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+freedas-core = { path = "../freedas-core" }
+freedas-db = { path = "../freedas-db" }
+serde.workspace = true
+serde_json.workspace = true

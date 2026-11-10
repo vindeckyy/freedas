@@ -1,0 +1,14 @@
+[package]
+name = "freedas-git"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+freedas-core = { path = "../freedas-core" }
+tokio.workspace = true
+ignore = "0.4"
+
+[dev-dependencies]
+tempfile.workspace = true

@@ -1,0 +1,10 @@
+[package]
+name = "freedas-sandbox"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+freedas-core = { path = "../freedas-core" }
+thiserror.workspace = true

@@ -1,0 +1,33 @@
+[package]
+name = "freedas-gateway"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "freedas-gateway"
+path = "src/main.rs"
+
+[dependencies]
+freedas-core = { path = "../freedas-core" }
+freedas-catalog = { path = "../freedas-catalog" }
+freedas-router = { path = "../freedas-router" }
+axum.workspace = true
+tokio.workspace = true
+futures.workspace = true
+clap = { workspace = true, features = ["env"] }
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+reqwest.workspace = true
+tracing.workspace = true
+ulid.workspace = true
+time.workspace = true
+sha2 = "0.10"
+hex = "0.4"
+sqlx = { version = "0.8", default-features = false, features = ["postgres", "runtime-tokio-rustls", "tls-rustls-ring"] }
+
+[dev-dependencies]
+wiremock = "0.6"
+tower = { version = "0.5", features = ["util"] }

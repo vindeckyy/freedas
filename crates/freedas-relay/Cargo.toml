@@ -1,0 +1,24 @@
+[package]
+name = "freedas-relay"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+freedas-core = { path = "../freedas-core" }
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+futures.workspace = true
+ulid.workspace = true
+tokio-tungstenite = "0.28"
+tokio-util.workspace = true
+rusqlite.workspace = true
+freedas-db = { path = "../freedas-db" }
+freedas-session = { path = "../freedas-session" }
+freedas-tools = { path = "../freedas-tools" }
+freedas-catalog = { path = "../freedas-catalog" }
+
+[dev-dependencies]
+tempfile.workspace = true

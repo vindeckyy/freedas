@@ -1,0 +1,29 @@
+[package]
+name = "freedas-plugin"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+freedas-core = { path = "../freedas-core" }
+serde.workspace = true
+serde_json.workspace = true
+rquickjs = "0.14"
+reqwest.workspace = true
+tar = "0.4"
+flate2 = "1"
+sha2 = "0.10"
+base64 = "0.22"
+wasmtime = { version = "39", default-features = false, features = [
+    "component-model",
+    "cranelift",
+    "runtime",
+    "std",
+    "wat",
+] }
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio.workspace = true
+wiremock = "0.6"

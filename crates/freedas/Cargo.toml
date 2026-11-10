@@ -1,0 +1,47 @@
+[package]
+name = "freedas"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "freedas"
+path = "src/main.rs"
+
+[dependencies]
+sha2 = "0.10"
+hex = "0.4"
+freedas-core = { path = "../freedas-core" }
+freedas-tools = { path = "../freedas-tools" }
+freedas-db = { path = "../freedas-db" }
+freedas-provider = { path = "../freedas-provider" }
+freedas-catalog = { path = "../freedas-catalog" }
+freedas-session = { path = "../freedas-session" }
+freedas-agent = { path = "../freedas-agent" }
+freedas-skill = { path = "../freedas-skill" }
+freedas-mcp = { path = "../freedas-mcp" }
+freedas-memory = { path = "../freedas-memory" }
+freedas-sync = { path = "../freedas-sync" }
+freedas-plugin = { path = "../freedas-plugin" }
+freedas-standards = { path = "../freedas-standards" }
+freedas-git = { path = "../freedas-git" }
+freedas-tui = { path = "../freedas-tui" }
+freedas-server = { path = "../freedas-server" }
+freedas-acp = { path = "../freedas-acp" }
+freedas-relay = { path = "../freedas-relay" }
+freedas-review = { path = "../freedas-review" }
+freedas-sandbox = { path = "../freedas-sandbox" }
+freedas-bench = { path = "../freedas-bench" }
+clap.workspace = true
+anyhow.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+jsonc-parser.workspace = true
+base64 = "0.22"
+tracing-subscriber.workspace = true
+ulid.workspace = true
+reqwest.workspace = true
+futures.workspace = true

@@ -1,0 +1,28 @@
+[package]
+name = "freedas-review"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "freedas-review"
+path = "src/main.rs"
+
+[dependencies]
+freedas-core = { path = "../freedas-core" }
+freedas-provider = { path = "../freedas-provider" }
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+clap = { workspace = true, features = ["env"] }
+anyhow.workspace = true
+sqlx = { version = "0.8", default-features = false, features = ["postgres", "runtime-tokio-rustls", "tls-rustls-ring"] }
+reqwest = { workspace = true, features = ["blocking"] }
+hmac = "0.12"
+sha2 = "0.10"
+jsonwebtoken = "9"
+tempfile.workspace = true
+
+[dev-dependencies]
+wiremock = "0.6"
