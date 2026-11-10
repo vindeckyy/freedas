@@ -117,6 +117,24 @@ pub fn builtin_catalog() -> Vec<ModelInfo> {
             60.0,
             0.94,
         ),
+        // Meta Model API (api.meta.ai/v1). Costs from models.dev; quality is
+        // a placeholder prior (no public benchmark data yet).
+        ModelInfo {
+            provider: "meta".into(),
+            id: "muse-spark-1.3-contributor".into(),
+            name: "Muse Spark 1.3".into(),
+            context: 1_048_576,
+            max_output: 131_072,
+            cost_input: 0.10,
+            cost_output: 0.20,
+            cost_cache_read: 0.002,
+            tools: true,
+            reasoning: true,
+            vision: true,
+            quality: 0.85,
+            tier: "cheap".into(),
+            variants: vec!["low".into(), "medium".into(), "high".into(), "max".into()],
+        },
     ]
     .into_iter()
     .chain(opencode_catalog())

@@ -94,6 +94,8 @@ fn env_names(provider: &str) -> Vec<String> {
     let derived = format!("{}_API_KEY", provider.to_uppercase().replace('-', "_"));
     match provider {
         "google" | "gemini" => vec!["GEMINI_API_KEY".to_string(), "GOOGLE_API_KEY".to_string()],
+        // models.dev canonical name first, freedas convention second.
+        "meta" => vec!["META_MODEL_API_KEY".to_string(), "META_API_KEY".to_string()],
         _ => vec![derived],
     }
 }

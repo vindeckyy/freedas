@@ -233,6 +233,12 @@ impl Runner {
                 "https://api.openai.com/v1",
                 stored,
             )),
+            // Meta Model API is OpenAI-compatible; key from META_MODEL_API_KEY,
+            // META_API_KEY, or the stored `meta` credential.
+            "meta" => Arc::new(freedas_provider::openai_compatible::OpenAiCompatible::new(
+                "https://api.meta.ai/v1",
+                stored,
+            )),
             // The self-hosted gateway bills the workspace and routes
             // `freedas/auto` server-side (docs: the gateway provider).
             "freedas" => Arc::new(freedas_provider::openai_compatible::OpenAiCompatible::new(

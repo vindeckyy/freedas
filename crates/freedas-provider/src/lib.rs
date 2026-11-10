@@ -267,7 +267,7 @@ fn retry_after(resp: &reqwest::Response) -> Option<Duration> {
         if !secs.is_finite() {
             return None;
         }
-        return Some(Duration::from_secs_f64(secs.clamp(0.0, 60.0)));
+        return Some(Duration::from_secs_f64(secs.max(0.0)));
     }
     // HTTP-date form (IMF-fixdate, e.g. `Wed, 21 Oct 2015 07:28:00 GMT`).
     parse_http_date_delay(trimmed)
@@ -312,7 +312,7 @@ fn parse_http_date_delay(value: &str) -> Option<Duration> {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(target);
-    let delay = (target - now).clamp(0, 60);
+    let delay = (target - now).max(0);
     Some(Duration::from_secs(delay as u64))
 }
 
@@ -353,12 +353,18 @@ fn jitter_delay(attempt: u32) -> Duration {
 }
 
 /// Send one request with bounded retries: 5 attempts, full jitter, honoring
-/// `Retry-After`. `ContextOverflow` and auth failures are returned at once.
+/// `Retry-After` up to `MAX_HONORED_RETRY_SECS`. A longer server ask (a
+/// monthly quota reset, not a rate limit) fails fast with the real error
+/// instead of sleeping through it. `ContextOverflow` and auth failures are
+/// returned at once.
 pub(crate) async fn send_with_retry(
     cancel: &tokio_util::sync::CancellationToken,
     build: impl Fn() -> reqwest::RequestBuilder,
 ) -> Result<reqwest::Response, ProviderError> {
     const MAX_ATTEMPTS: u32 = 5;
+    /// Longest `Retry-After` worth honoring; larger values are quota resets,
+    /// not rate limits, and waiting them out would hang the session.
+    const MAX_HONORED_RETRY: std::time::Duration = std::time::Duration::from_secs(60);
     let mut attempt = 0;
     loop {
         attempt += 1;
@@ -379,7 +385,13 @@ pub(crate) async fn send_with_retry(
         if !error.retryable || attempt >= MAX_ATTEMPTS {
             return Err(error);
         }
-        let delay = retry_at.unwrap_or_else(|| jitter_delay(attempt));
+        // A hopeless wait (monthly quota, not a rate limit) fails fast with
+        // the server's message instead of sleeping through it.
+        let delay = match retry_at {
+            Some(d) if d > MAX_HONORED_RETRY => return Err(error),
+            Some(d) => d,
+            None => jitter_delay(attempt),
+        };
         tokio::select! {
             _ = tokio::time::sleep(delay) => {}
             _ = cancel.cancelled() => return Err(cancelled_error()),
@@ -1976,6 +1988,29 @@ mod tests {
             openai_compatible::OpenAiCompatible::new(&format!("{}/v1", server.uri()), None);
         assert_eq!(provider.models().await.unwrap(), vec!["m-1".to_string()]);
         assert_eq!(server.received_requests().await.unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn huge_retry_after_fails_fast_instead_of_sleeping() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/models"))
+            .respond_with(
+                ResponseTemplate::new(429)
+                    .insert_header("retry-after", "999999")
+                    .set_body_string("quota exhausted"),
+            )
+            .mount(&server)
+            .await;
+        let provider =
+            openai_compatible::OpenAiCompatible::new(&format!("{}/v1", server.uri()), None);
+        let start = std::time::Instant::now();
+        let err = provider
+            .models()
+            .await
+            .expect_err("quota error must surface");
+        assert!(start.elapsed() < std::time::Duration::from_secs(10));
+        assert_eq!(err.status, Some(429));
     }
 
     #[test]
