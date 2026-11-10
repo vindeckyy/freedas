@@ -12,7 +12,7 @@ serde.workspace = true
 serde_json.workspace = true
 futures.workspace = true
 ulid.workspace = true
-tokio-tungstenite = "0.28"
+tokio-tungstenite = "0.29"
 tokio-util.workspace = true
 rusqlite.workspace = true
 freedas-db = { path = "../freedas-db" }
