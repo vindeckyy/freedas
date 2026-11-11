@@ -129,10 +129,25 @@ struct Terminal {
 /// `(request id, session id, action, resource)`.
 type RaisedRequest = (String, String, String, String);
 
+/// Frees a prompt's cancels entry when its worker thread exits on any path;
+/// without it finished prompts accumulate toward MAX_PROMPTS forever.
+struct CancelSlot {
+    cancels: Arc<Mutex<HashMap<String, tokio_util::sync::CancellationToken>>>,
+    session_id: String,
+}
+
+impl Drop for CancelSlot {
+    fn drop(&mut self) {
+        if let Ok(mut cancels) = self.cancels.lock() {
+            cancels.remove(&self.session_id);
+        }
+    }
+}
+
 pub struct AcpServer {
     db: Arc<Db>,
     sessions: HashMap<String, Session>,
-    cancels: HashMap<String, tokio_util::sync::CancellationToken>,
+    cancels: Arc<Mutex<HashMap<String, tokio_util::sync::CancellationToken>>>,
     pending: Arc<std::sync::Mutex<Vec<String>>>,
     /// Permission requests awaiting a client answer, keyed by request ID.
     permissions: HashMap<String, PendingPermission>,
@@ -157,7 +172,7 @@ impl AcpServer {
             db,
             allowed_roots: vec![launch],
             sessions: HashMap::new(),
-            cancels: HashMap::new(),
+            cancels: Arc::new(Mutex::new(HashMap::new())),
             pending: Arc::new(std::sync::Mutex::new(Vec::new())),
             permissions: HashMap::new(),
             raised: Arc::new(Mutex::new(Vec::new())),
@@ -220,7 +235,7 @@ impl AcpServer {
                     .get("sessionId")
                     .and_then(Value::as_str)
                     .unwrap_or("");
-                if let Some(token) = self.cancels.remove(session_id) {
+                if let Some(token) = self.cancels.lock().expect("cancels").remove(session_id) {
                     token.cancel();
                 }
                 vec![response(id, json!({ "ok": true }))]
@@ -403,12 +418,26 @@ impl AcpServer {
         let Some(session) = self.sessions.get(session_id).cloned() else {
             return vec![rpc_error(id, -32602, "unknown session".into())];
         };
-        if self.cancels.len() >= MAX_PROMPTS {
-            return vec![rpc_error(id, -32000, "too many prompts in flight".into())];
-        }
         let response_id = id.clone();
-        let token = tokio_util::sync::CancellationToken::new();
-        self.cancels.insert(session_id.to_string(), token.clone());
+        // Two prompts on one session would interleave in one transcript, and
+        // the first run's cancel token would be overwritten.
+        let token = {
+            let mut cancels = self.cancels.lock().expect("cancels");
+            if cancels.contains_key(session_id) {
+                return vec![rpc_error(
+                    id,
+                    -32000,
+                    "session has a prompt in flight".into(),
+                )];
+            }
+            if cancels.len() >= MAX_PROMPTS {
+                return vec![rpc_error(id, -32000, "too many prompts in flight".into())];
+            }
+            let token = tokio_util::sync::CancellationToken::new();
+            cancels.insert(session_id.to_string(), token.clone());
+            token
+        };
+        let cancels = self.cancels.clone();
         let db = self.db.clone();
         let pending = self.pending.clone();
         let raised = self.raised.clone();
@@ -420,6 +449,11 @@ impl AcpServer {
         // Keep the runner off the stdio runtime: a permission prompt blocks the
         // runner thread until this loop forwards the client's answer.
         std::thread::spawn(move || {
+            // Frees the cancels entry on every exit - result, bail, or panic.
+            let _slot = CancelSlot {
+                cancels,
+                session_id: session_id.clone(),
+            };
             let runtime = match tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
