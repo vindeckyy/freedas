@@ -1384,9 +1384,7 @@ impl Runner {
                         // interactive approver — never run them silently in
                         // a headless run. The env opt-out relaxes this the
                         // same way it does the bash tool.
-                        let sandbox_opted_out = std::env::var("FREEDAS_EXPERIMENTAL_SANDBOX")
-                            .map(|v| v == "false" || v == "0")
-                            .unwrap_or(false);
+                        let sandbox_opted_out = freedas_sandbox::opted_out();
                         let gate = freedas_standards::run_gate_cancellable(
                             &project_root,
                             &commands,
@@ -2177,10 +2175,7 @@ fn config_max_tokens(config: &Config, catalog: &[ModelInfo], full: &str) -> Opti
 
 /// Whether tool subprocesses run inside the OS sandbox for this run.
 fn sandbox_enabled(config: &Config, headless: bool) -> bool {
-    let opted_out = std::env::var("FREEDAS_EXPERIMENTAL_SANDBOX")
-        .map(|v| v == "false" || v == "0")
-        .unwrap_or(false);
-    if opted_out || !freedas_sandbox::available() {
+    if freedas_sandbox::opted_out() || !freedas_sandbox::available() {
         return false;
     }
     match config.sandbox.mode.as_str() {

@@ -279,9 +279,7 @@ async fn apply_via_patch_bin(
     // already refused to upgrade `ask` when no backend exists, so the direct
     // fallback below runs only after an explicit approval.
     let wrap = |args: &[String]| -> Result<Vec<String>> {
-        let opted_out = std::env::var("FREEDAS_EXPERIMENTAL_SANDBOX")
-            .map(|v| v == "false" || v == "0")
-            .unwrap_or(false);
+        let opted_out = freedas_sandbox::opted_out();
         if !ctx.sandbox || opted_out {
             // `!ctx.sandbox` while sandboxing was configured means no working
             // backend; refuse headless rather than run bare.

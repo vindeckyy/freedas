@@ -31,6 +31,13 @@ const SYSTEM_READ_PATHS: &[&str] = &[
     "/private/tmp",
 ];
 
+/// The explicit opt-out shared by bash, patch, and the standards gate.
+pub fn opted_out() -> bool {
+    std::env::var("FREEDAS_EXPERIMENTAL_SANDBOX")
+        .map(|v| v == "false" || v == "0")
+        .unwrap_or(false)
+}
+
 pub fn available() -> bool {
     which("sandbox-exec").is_some() || bwrap_works()
 }

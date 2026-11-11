@@ -1242,9 +1242,7 @@ impl Tool for Bash {
             cwd: Some(final_cwd.clone()),
             allow_all_reads,
         };
-        let opted_out = std::env::var("FREEDAS_EXPERIMENTAL_SANDBOX")
-            .map(|v| v == "false" || v == "0")
-            .unwrap_or(false);
+        let opted_out = freedas_sandbox::opted_out();
         let sandbox_off = !ctx.sandbox || opted_out;
         let no_backend_err = |ctx: &ToolContext| -> FreedasError {
             if ctx.config.sandbox.mode == "on" {
