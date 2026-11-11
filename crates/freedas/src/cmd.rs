@@ -2477,6 +2477,7 @@ async fn attach_run(opts: AttachRun) -> Result<i32, Box<dyn std::error::Error>> 
         eprintln!("freedas: --format must be json or text");
         return Ok(2);
     }
+    let json_mode = opts.format == "json";
     let base = opts.base.trim_end_matches('/').to_string();
     let client = server_client().map_err(|e| format!("attach: {e}"))?;
     let mut session_id = opts.session;
@@ -2533,6 +2534,18 @@ async fn attach_run(opts: AttachRun) -> Result<i32, Box<dyn std::error::Error>> 
                 .ok_or("attach: server returned no session id")?
         }
     };
+    // Mirror the local run's stream contract: session.started opens the JSONL
+    // output even though the server's session.created fired before subscribe.
+    if json_mode {
+        println!(
+            "{}",
+            serde_json::json!({
+                "type": "session.started",
+                "sessionID": session_id,
+                "timestamp": freedas_core::paths::now_ms(),
+            })
+        );
+    }
     // Subscribe before prompting so no event is missed.
     let mut resp = client
         .get(format!("{base}/event"))
@@ -2557,7 +2570,6 @@ async fn attach_run(opts: AttachRun) -> Result<i32, Box<dyn std::error::Error>> 
     let prompt_task = tokio::spawn(async move {
         freedas_server::client::request(&prompt_client, &prompt_url, "POST", Some(&body)).await
     });
-    let json_mode = opts.format == "json";
     let mut buffer = String::new();
     let mut streamed = String::new();
     let mut completed = false;
