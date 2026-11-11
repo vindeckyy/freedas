@@ -591,11 +591,7 @@ pub async fn run(cli: Cli, project_root: PathBuf) -> Result<i32, Box<dyn std::er
                     let kind = if s.parent_id.is_some() { "sub" } else { "main" };
                     // Titles carry prompt/API text: drop control chars so an
                     // ANSI escape cannot move the cursor or fake output.
-                    let title: String = s
-                        .title
-                        .chars()
-                        .map(|c| if c.is_control() { ' ' } else { c })
-                        .collect();
+                    let title = flat(&s.title);
                     println!("{}\t{}\t{}\t{}\t{}", s.id, s.status, kind, s.agent, title);
                 }
                 Ok(0)
@@ -1860,7 +1856,9 @@ pub async fn run(cli: Cli, project_root: PathBuf) -> Result<i32, Box<dyn std::er
                     let scope = mem_scope(&d, global)?;
                     let mem = freedas_memory::Memory::new(d, scope);
                     for t in mem.recall(50) {
-                        println!("- {}", freedas_core::redact::redact(&t));
+                        // Distilled model text: redact secrets and drop
+                        // control chars before it reaches the terminal.
+                        println!("- {}", flat(&freedas_core::redact::redact(&t)));
                     }
                     Ok(0)
                 }
@@ -1875,7 +1873,7 @@ pub async fn run(cli: Cli, project_root: PathBuf) -> Result<i32, Box<dyn std::er
                                 .into());
                             }
                             println!("{id}\tscope={scope}\tkind={kind}\tconfidence={confidence}");
-                            println!("{}", freedas_core::redact::redact(&text));
+                            println!("{}", flat(&freedas_core::redact::redact(&text)));
                         }
                         None => println!("memory {id} not found"),
                     }
