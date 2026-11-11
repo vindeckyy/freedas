@@ -78,12 +78,14 @@ All JSON, camelCase.
 
 ## SSE events
 
-`GET /event` streams typed events: `server.connected`, `session.created`,
-`session.updated`, `session.deleted`, `session.status`, `message.updated`,
-`message.part.updated`, `message.removed`, `permission.asked`,
-`permission.replied`, `todo.updated`, `gate.started`, `gate.passed`,
-`gate.failed`, `usage.updated`, `relay.status`, `mcp.status`, `lsp.status`,
-`error`. Each carries `id`, `timestamp`, and `sessionID` where applicable.
+`GET /event` streams typed events: `server.connected`, `server.lagged`,
+`server.gap`, `session.created`, `session.deleted`, `session.status`,
+`session.idle`, `session.stopped`, `session.error`, `session.reverted`,
+`session.marker`, `message.updated`, `message.part.delta`,
+`message.part.updated`, `permission.asked`, `permission.replied`,
+`tool.result`. Each carries `id`, `timestamp`, and `sessionID` where
+applicable. Usage totals are pulled from `GET /session/{id}/usage` rather
+than streamed.
 
 ## Clients
 
