@@ -686,6 +686,67 @@ struct RunRequest {
     variant: Option<String>,
 }
 
+/// Owns a live run's bookkeeping; dropped when the task finishes *or panics*.
+/// Without it a panic strands the aborts entry (session reads "busy" forever,
+/// every later prompt 409s) and emits no terminal event.
+struct RunGuard {
+    aborts: Arc<
+        std::sync::Mutex<
+            std::collections::HashMap<String, Arc<tokio_util::sync::CancellationToken>>,
+        >,
+    >,
+    pending: Arc<std::sync::Mutex<std::collections::HashMap<String, PendingPerm>>>,
+    bus: broadcast::Sender<Value>,
+    events: EventLog,
+    id: String,
+    token: Arc<tokio_util::sync::CancellationToken>,
+    settled: std::sync::atomic::AtomicBool,
+}
+
+impl Drop for RunGuard {
+    fn drop(&mut self) {
+        // Only the run that inserted this token may remove it (a later run's
+        // token is never cleared by a finishing predecessor).
+        if let Ok(mut aborts) = self.aborts.lock()
+            && aborts
+                .get(&self.id)
+                .map(|token| Arc::ptr_eq(token, &self.token))
+                .unwrap_or(false)
+        {
+            aborts.remove(&self.id);
+        }
+        // Parked permission asks must not outlive the run.
+        if let Ok(mut pending) = self.pending.lock() {
+            let ids: Vec<String> = pending
+                .iter()
+                .filter(|(_, (sid, _))| sid == &self.id)
+                .map(|(id, _)| id.clone())
+                .collect();
+            for id in ids {
+                if let Some((_, tx)) = pending.remove(&id) {
+                    let _ = tx.send(freedas_tools::PermissionReply::Reject);
+                }
+            }
+        }
+        if !self.settled.load(std::sync::atomic::Ordering::Relaxed) {
+            emit(
+                &self.bus,
+                &self.events,
+                json!({
+                    "type": "session.error",
+                    "sessionID": self.id,
+                    "error": "run aborted unexpectedly",
+                }),
+            );
+        }
+        emit(
+            &self.bus,
+            &self.events,
+            json!({"type": "session.idle", "sessionID": self.id}),
+        );
+    }
+}
+
 /// Spawn the agent run for a prompt. Returns `409` when the session already
 /// has a live run, so two prompts cannot interleave in one transcript. Shared
 /// by the prompt endpoints so they stream the same events on the bus.
@@ -744,6 +805,15 @@ fn spawn_run(s: &AppState, id: String, request: RunRequest) -> Result<(), ApiErr
     let aborts = s.aborts.clone();
     let pending = s.pending_perms.clone();
     tokio::spawn(async move {
+        let guard = RunGuard {
+            aborts: aborts.clone(),
+            pending: pending.clone(),
+            bus: bus.clone(),
+            events: events.clone(),
+            id: session_id.clone(),
+            token: cancel.clone(),
+            settled: false.into(),
+        };
         let cfg =
             freedas_core::config::load(&paths, project_config_disabled()).unwrap_or_else(|e| {
                 eprintln!("config: {e}");
@@ -847,18 +917,6 @@ fn spawn_run(s: &AppState, id: String, request: RunRequest) -> Result<(), ApiErr
                 (*cancel).clone(),
             )
             .await;
-        {
-            let mut aborts = aborts.lock().expect("aborts");
-            // Only the run that inserted this token may remove it, so a later
-            // run's token is never cleared by a finishing predecessor.
-            if aborts
-                .get(&session_id)
-                .map(|token| Arc::ptr_eq(token, &cancel))
-                .unwrap_or(false)
-            {
-                aborts.remove(&session_id);
-            }
-        }
         match result {
             Ok(r) => {
                 emit(
@@ -895,11 +953,11 @@ fn spawn_run(s: &AppState, id: String, request: RunRequest) -> Result<(), ApiErr
                 );
             }
         }
-        emit(
-            &bus,
-            &events,
-            json!({"type": "session.idle", "sessionID": session_id}),
-        );
+        // Normal end: the guard emits session.idle (and would have emitted
+        // session.error first had the task unwound).
+        guard
+            .settled
+            .store(true, std::sync::atomic::Ordering::Relaxed);
     });
     Ok(())
 }
