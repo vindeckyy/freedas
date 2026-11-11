@@ -1091,6 +1091,7 @@ async fn fork_session(
     let new_id =
         s.db.fork_session(&pid, &id, body.message_id.as_deref())
             .map_err(internal)?;
+    s.emit(json!({"type": "session.created", "sessionID": new_id}));
     Ok(Json(json!({"id": new_id})))
 }
 
@@ -1377,7 +1378,9 @@ async fn post_command(
         let pid =
             s.db.ensure_project(&s.paths.project_root)
                 .map_err(internal)?;
-        s.db.fork_session(&pid, &id, None).map_err(internal)?
+        let child = s.db.fork_session(&pid, &id, None).map_err(internal)?;
+        s.emit(json!({"type": "session.created", "sessionID": child}));
+        child
     } else {
         id.clone()
     };
