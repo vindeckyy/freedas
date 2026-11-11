@@ -35,6 +35,17 @@ The web UI is a single HTML file, so nothing else in the build parses its
 inline JavaScript. `scripts/check-spa.sh` parses it with `node --check`; it
 skips when node is not installed, and CI runs it on every push.
 
+The control-plane tests need a real PostgreSQL and are skipped without one:
+
+```sh
+FREEDAS_PG_URL=postgres://postgres:postgres@127.0.0.1:5432/postgres \
+DATABASE_URL=$FREEDAS_PG_URL \
+  cargo test -p freedas-control -- --ignored --test-threads=1
+```
+
+They share one database and one of them drops the auth tables, so they run
+one at a time. CI runs them against a `postgres:17-alpine` service.
+
 ## Conventions
 
 - **Edition 2024, `thiserror` errors.** Library crates return typed errors;

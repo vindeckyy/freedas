@@ -23,6 +23,23 @@ use sqlx::PgPool;
 type ApiError = (StatusCode, Json<Value>);
 type ApiResult<T = Json<Value>> = Result<T, ApiError>;
 
+/// Apply the control-plane DDL under a database lock. `CREATE TABLE IF NOT
+/// EXISTS` is not safe against a concurrent creator: two control planes
+/// starting at the same time race on the catalog and one of them dies with
+/// `duplicate key value violates unique constraint pg_type_typname_nsp_index`.
+/// The advisory lock is held for the transaction, so it also serializes a
+/// second process against this one.
+pub async fn migrate(pool: &PgPool, statements: &[&str]) -> Result<(), sqlx::Error> {
+    let mut tx = pool.begin().await?;
+    sqlx::query("SELECT pg_advisory_xact_lock(60231317)")
+        .execute(&mut *tx)
+        .await?;
+    for statement in statements {
+        sqlx::query(statement).execute(&mut *tx).await?;
+    }
+    tx.commit().await
+}
+
 #[derive(Clone)]
 struct AppState {
     pool: PgPool,
@@ -1494,16 +1511,10 @@ mod tests {
         let Ok(pool) = sqlx::PgPool::connect(&url).await else {
             return;
         };
-        sqlx::query("CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, email TEXT NOT NULL UNIQUE, name TEXT NOT NULL, password_hash TEXT, oidc_sub TEXT UNIQUE, created_at BIGINT NOT NULL)")
-            .execute(&pool).await.expect("users");
-        sqlx::query("CREATE TABLE IF NOT EXISTS workspaces (id TEXT PRIMARY KEY, slug TEXT NOT NULL UNIQUE, name TEXT NOT NULL, kind TEXT NOT NULL, owner_id TEXT REFERENCES users(id), settings JSONB NOT NULL DEFAULT '{}'::jsonb, created_at BIGINT NOT NULL)")
-            .execute(&pool).await.expect("workspaces");
-        sqlx::query("CREATE TABLE IF NOT EXISTS memberships (workspace_id TEXT REFERENCES workspaces(id) ON DELETE CASCADE, user_id TEXT REFERENCES users(id) ON DELETE CASCADE, role TEXT NOT NULL, PRIMARY KEY (workspace_id, user_id))")
-            .execute(&pool).await.expect("memberships");
-        sqlx::query("CREATE TABLE IF NOT EXISTS wallet_ledger (id TEXT PRIMARY KEY, workspace_id TEXT REFERENCES workspaces(id) ON DELETE CASCADE, delta_usd NUMERIC(12,6) NOT NULL, reason TEXT NOT NULL, ref TEXT, created_at BIGINT NOT NULL)")
-            .execute(&pool).await.expect("wallet_ledger");
-        sqlx::query("CREATE TABLE IF NOT EXISTS api_tokens (id TEXT PRIMARY KEY, user_id TEXT REFERENCES users(id) ON DELETE CASCADE, workspace_id TEXT REFERENCES workspaces(id) ON DELETE CASCADE, token_hash TEXT NOT NULL UNIQUE, scopes TEXT, last_used_at BIGINT, expires_at BIGINT, revoked_at BIGINT, created_at BIGINT NOT NULL)")
-            .execute(&pool).await.expect("api_tokens");
+        // The same schema the API tests use, applied under the database lock:
+        // two bootstraps in the same database would otherwise race on the
+        // catalog and one of them would die with a duplicate key error.
+        migrate(&pool, api_tests::SCHEMA).await.expect("schema");
         // Seed owner + workspace, log in, and read the wallet back.
         use argon2::PasswordHasher;
         use argon2::password_hash::{SaltString, rand_core::OsRng};
@@ -4843,7 +4854,7 @@ mod api_tests {
     use http_body_util::BodyExt;
     use tower::ServiceExt;
 
-    const SCHEMA: &[&str] = &[
+    pub(crate) const SCHEMA: &[&str] = &[
         "CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, email TEXT NOT NULL UNIQUE, name TEXT NOT NULL, password_hash TEXT, oidc_sub TEXT UNIQUE, active BOOLEAN NOT NULL DEFAULT TRUE, created_at BIGINT NOT NULL)",
         "ALTER TABLE users ADD COLUMN IF NOT EXISTS active BOOLEAN NOT NULL DEFAULT TRUE",
         "CREATE TABLE IF NOT EXISTS workspaces (id TEXT PRIMARY KEY, slug TEXT NOT NULL UNIQUE, name TEXT NOT NULL, kind TEXT NOT NULL, owner_id TEXT REFERENCES users(id), settings JSONB NOT NULL DEFAULT '{}'::jsonb, created_at BIGINT NOT NULL)",
@@ -4939,6 +4950,29 @@ mod api_tests {
             .ok()
     }
 
+    /// Two control planes starting at the same time must both come up: the
+    /// DDL is applied under a database lock, so the second one waits instead
+    /// of dying on a duplicate key error.
+    #[tokio::test]
+    #[ignore]
+    async fn concurrent_migrations_do_not_collide() {
+        let Some(pool) = pg().await else {
+            return;
+        };
+        // Both migrations create the same fresh table: without the lock they
+        // race on the catalog and one of them dies.
+        let table = format!("migrate_race_{}", ulid::Ulid::new());
+        let ddl = format!("CREATE TABLE IF NOT EXISTS {table} (id TEXT PRIMARY KEY)");
+        let statements = [ddl.as_str()];
+        let (first, second) =
+            tokio::join!(migrate(&pool, &statements), migrate(&pool, &statements),);
+        first.expect("first migration");
+        second.expect("second migration");
+        let _ = sqlx::query(&format!("DROP TABLE IF EXISTS {table}"))
+            .execute(&pool)
+            .await;
+    }
+
     /// Seed a user, an organization workspace, and an owner token.
     async fn seed(pool: &PgPool) -> (String, String, String) {
         let now = now_ms();
@@ -5022,9 +5056,7 @@ mod api_tests {
             return;
         };
         let _guard = SCHEMA_LOCK.lock().await;
-        for stmt in SCHEMA {
-            let _ = sqlx::query(stmt).execute(&pool).await;
-        }
+        let _ = migrate(&pool, SCHEMA).await;
         let (_u1, _w1, token_a) = seed(&pool).await;
         let (_u2, _w2, token_b) = seed(&pool).await;
         let app = app(pool.clone(), "http://localhost".into());
@@ -5092,9 +5124,7 @@ mod api_tests {
             return;
         };
         let _guard = SCHEMA_LOCK.lock().await;
-        for stmt in SCHEMA {
-            let _ = sqlx::query(stmt).execute(&pool).await;
-        }
+        let _ = migrate(&pool, SCHEMA).await;
         let now = now_ms();
         let user = format!("usr_{}", ulid::Ulid::new());
         let ws = format!("ws_{}", ulid::Ulid::new());
@@ -5247,9 +5277,7 @@ mod api_tests {
             std::env::remove_var("FREEDAS_GITHUB_API_BASE");
         }
         let _schema = SCHEMA_LOCK.lock().await;
-        for stmt in SCHEMA {
-            let _ = sqlx::query(stmt).execute(&pool).await;
-        }
+        let _ = migrate(&pool, SCHEMA).await;
         let (_user, ws, workspace_token) = seed(&pool).await;
         let now = now_ms();
         let sandbox = format!("sbx_{}", ulid::Ulid::new());
@@ -5343,9 +5371,7 @@ mod api_tests {
             std::env::set_var("FREEDAS_RUNNER_TOKEN", "runner-secret");
         }
         let _schema = SCHEMA_LOCK.lock().await;
-        for stmt in SCHEMA {
-            let _ = sqlx::query(stmt).execute(&pool).await;
-        }
+        let _ = migrate(&pool, SCHEMA).await;
         let (_user, ws, workspace_token) = seed(&pool).await;
         let now = now_ms();
         let sandbox = format!("sbx_{}", ulid::Ulid::new());
@@ -5427,9 +5453,7 @@ mod api_tests {
             return;
         };
         let _guard = SCHEMA_LOCK.lock().await;
-        for stmt in SCHEMA {
-            let _ = sqlx::query(stmt).execute(&pool).await;
-        }
+        let _ = migrate(&pool, SCHEMA).await;
         let (_user, ws, _token) = seed(&pool).await;
         // Rows from an earlier run are already failed; drop them so a rerun
         // cannot inflate the reaped count.
@@ -5489,9 +5513,7 @@ mod api_tests {
             return;
         };
         let _guard = SCHEMA_LOCK.lock().await;
-        for stmt in SCHEMA {
-            let _ = sqlx::query(stmt).execute(&pool).await;
-        }
+        let _ = migrate(&pool, SCHEMA).await;
         let (_user, ws, token) = seed(&pool).await;
         let now = now_ms();
         let id = format!("tok_{}", ulid::Ulid::new());
@@ -5559,9 +5581,7 @@ mod api_tests {
                 .execute(&pool)
                 .await;
         }
-        for statement in SCHEMA {
-            sqlx::query(statement).execute(&pool).await.unwrap();
-        }
+        migrate(&pool, SCHEMA).await.unwrap();
         let app = app(pool.clone(), "http://localhost".into());
         let first = call(
             &app,
@@ -5599,9 +5619,7 @@ mod api_tests {
             return;
         };
         let _guard = SCHEMA_LOCK.lock().await;
-        for stmt in SCHEMA {
-            let _ = sqlx::query(stmt).execute(&pool).await;
-        }
+        let _ = migrate(&pool, SCHEMA).await;
         let (owner, ws, token) = seed(&pool).await;
         let app = app(pool.clone(), "http://localhost".into());
 
@@ -6168,9 +6186,7 @@ mod api_tests {
             return;
         };
         let _guard = SCHEMA_LOCK.lock().await;
-        for stmt in SCHEMA {
-            let _ = sqlx::query(stmt).execute(&pool).await;
-        }
+        let _ = migrate(&pool, SCHEMA).await;
 
         use argon2::PasswordHasher;
         use argon2::password_hash::{SaltString, rand_core::OsRng};
@@ -6367,9 +6383,7 @@ mod api_tests {
             return;
         };
         let _guard = SCHEMA_LOCK.lock().await;
-        for stmt in SCHEMA {
-            let _ = sqlx::query(stmt).execute(&pool).await;
-        }
+        let _ = migrate(&pool, SCHEMA).await;
         let now = now_ms();
         let user = format!("usr_{}", ulid::Ulid::new());
         let ws = format!("ws_{}", ulid::Ulid::new());
@@ -6474,9 +6488,7 @@ mod api_tests {
             return;
         };
         let _guard = SCHEMA_LOCK.lock().await;
-        for stmt in SCHEMA {
-            let _ = sqlx::query(stmt).execute(&pool).await;
-        }
+        let _ = migrate(&pool, SCHEMA).await;
         let (_user, ws, token) = seed(&pool).await;
         let (_other_user, other_ws, _other_token) = seed(&pool).await;
         let now = now_ms();
@@ -6611,9 +6623,7 @@ mod api_tests {
             return;
         };
         let _guard = SCHEMA_LOCK.lock().await;
-        for stmt in SCHEMA {
-            let _ = sqlx::query(stmt).execute(&pool).await;
-        }
+        let _ = migrate(&pool, SCHEMA).await;
         let (user, ws, token) = seed(&pool).await;
         let (_other_user, _other_ws, other_token) = seed(&pool).await;
         let installation = (ulid::Ulid::new().0 % (1 << 62)) as i64;
@@ -6703,9 +6713,7 @@ mod api_tests {
             return;
         };
         let _guard = SCHEMA_LOCK.lock().await;
-        for stmt in SCHEMA {
-            let _ = sqlx::query(stmt).execute(&pool).await;
-        }
+        let _ = migrate(&pool, SCHEMA).await;
         let (_user, ws, token) = seed(&pool).await;
         let now = now_ms();
         let url = "https://github.com/acme/api/pull/7#pullrequestreview-1";
@@ -6764,9 +6772,7 @@ mod api_tests {
             return;
         };
         let _guard = SCHEMA_LOCK.lock().await;
-        for stmt in SCHEMA {
-            let _ = sqlx::query(stmt).execute(&pool).await;
-        }
+        let _ = migrate(&pool, SCHEMA).await;
         let (_user, ws, token) = seed(&pool).await;
         let (_other_user, _other_ws, other_token) = seed(&pool).await;
         let app = app(pool.clone(), "http://localhost".into());
@@ -6881,9 +6887,7 @@ mod api_tests {
             return;
         };
         let _guard = SCHEMA_LOCK.lock().await;
-        for stmt in SCHEMA {
-            let _ = sqlx::query(stmt).execute(&pool).await;
-        }
+        let _ = migrate(&pool, SCHEMA).await;
         let (user, ws, token) = seed(&pool).await;
         let (_other_user, _other_ws, other_token) = seed(&pool).await;
         let app = app(pool.clone(), "http://localhost".into());
@@ -6981,9 +6985,7 @@ mod api_tests {
             return;
         };
         let _schema = SCHEMA_LOCK.lock().await;
-        for stmt in SCHEMA {
-            let _ = sqlx::query(stmt).execute(&pool).await;
-        }
+        let _ = migrate(&pool, SCHEMA).await;
 
         let mock = MockServer::start().await;
         Mock::given(method("POST"))
@@ -7120,9 +7122,7 @@ VYzfNgnqS52tKDQJ3zToKgMz
             return;
         };
         let _schema = SCHEMA_LOCK.lock().await;
-        for stmt in SCHEMA {
-            let _ = sqlx::query(stmt).execute(&pool).await;
-        }
+        let _ = migrate(&pool, SCHEMA).await;
         let (_user, ws, token) = seed(&pool).await;
         let installation = (ulid::Ulid::new().0 % (1 << 62)) as i64;
         let repo = format!("o/n-{ws}");
@@ -7242,9 +7242,7 @@ VYzfNgnqS52tKDQJ3zToKgMz
             return;
         };
         let _guard = SCHEMA_LOCK.lock().await;
-        for stmt in SCHEMA {
-            let _ = sqlx::query(stmt).execute(&pool).await;
-        }
+        let _ = migrate(&pool, SCHEMA).await;
         let (_owner, ws, token) = seed(&pool).await;
         let (_other_owner, other_ws, _other_token) = seed(&pool).await;
         let app = app(pool.clone(), "http://localhost".into());
@@ -7300,9 +7298,7 @@ VYzfNgnqS52tKDQJ3zToKgMz
             return;
         };
         let _guard = SCHEMA_LOCK.lock().await;
-        for stmt in SCHEMA {
-            let _ = sqlx::query(stmt).execute(&pool).await;
-        }
+        let _ = migrate(&pool, SCHEMA).await;
         let (_user, ws, _token) = seed(&pool).await;
         let now = now_ms();
         let sandbox = format!("sbx_{}", ulid::Ulid::new());
@@ -7372,9 +7368,7 @@ VYzfNgnqS52tKDQJ3zToKgMz
             return;
         };
         let _guard = SCHEMA_LOCK.lock().await;
-        for stmt in SCHEMA {
-            let _ = sqlx::query(stmt).execute(&pool).await;
-        }
+        let _ = migrate(&pool, SCHEMA).await;
         let (_owner, ws, token) = seed(&pool).await;
         let (_other_owner, _other_ws, other_token) = seed(&pool).await;
         let (member, _email, member_token) = add_member_token(&pool, &ws, "member").await;
@@ -7409,9 +7403,7 @@ VYzfNgnqS52tKDQJ3zToKgMz
             return;
         };
         let _guard = SCHEMA_LOCK.lock().await;
-        for stmt in SCHEMA {
-            let _ = sqlx::query(stmt).execute(&pool).await;
-        }
+        let _ = migrate(&pool, SCHEMA).await;
         let (_owner, ws, token) = seed(&pool).await;
         let (_other_owner, _other_ws, other_token) = seed(&pool).await;
         let app = app(pool.clone(), "http://localhost".into());
@@ -7472,9 +7464,7 @@ VYzfNgnqS52tKDQJ3zToKgMz
             return;
         };
         let _guard = SCHEMA_LOCK.lock().await;
-        for stmt in SCHEMA {
-            let _ = sqlx::query(stmt).execute(&pool).await;
-        }
+        let _ = migrate(&pool, SCHEMA).await;
         let (owner, ws, token) = seed(&pool).await;
         let (member, member_email, _member_token) = add_member_token(&pool, &ws, "member").await;
         let (_admin, _admin_email, admin_token) = add_member_token(&pool, &ws, "admin").await;
@@ -7539,9 +7529,7 @@ VYzfNgnqS52tKDQJ3zToKgMz
             return;
         };
         let _guard = SCHEMA_LOCK.lock().await;
-        for stmt in SCHEMA {
-            let _ = sqlx::query(stmt).execute(&pool).await;
-        }
+        let _ = migrate(&pool, SCHEMA).await;
         let (_owner, ws, token) = seed(&pool).await;
         let (_member, _email, member_token) = add_member_token(&pool, &ws, "member").await;
         let app = app(pool.clone(), "http://localhost".into());

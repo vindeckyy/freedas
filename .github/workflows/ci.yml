@@ -66,6 +66,32 @@ jobs:
       # is unset, so no service container is needed here.
       - run: cargo test --locked --workspace
 
+  control:
+    name: control plane (postgres)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      FREEDAS_PG_URL: postgres://postgres:postgres@127.0.0.1:5432/postgres
+      DATABASE_URL: postgres://postgres:postgres@127.0.0.1:5432/postgres
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+      # The control-plane tests need a real database. They share one, so they
+      # run one at a time: one of them drops the auth tables.
+      - run: cargo test --locked -p freedas-control -- --ignored --test-threads=1
+
   e2e:
     name: e2e (${{ matrix.os }})
     strategy:

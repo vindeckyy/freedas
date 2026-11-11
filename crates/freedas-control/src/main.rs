@@ -89,9 +89,7 @@ struct Cli {
 async fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     let pool = sqlx::PgPool::connect(&cli.database_url).await?;
-    for statement in MIGRATIONS {
-        sqlx::query(statement).execute(&pool).await?;
-    }
+    freedas_control::migrate(&pool, MIGRATIONS).await?;
     // A sandbox that stops heartbeating for 60s is failed; this runs off the
     // request path.
     let reaper_pool = pool.clone();
