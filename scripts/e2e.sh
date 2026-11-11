@@ -41,6 +41,18 @@ $BIN run "READ:.env" --format json >/dev/null 2>"$D/blocked.err"; RC=$?
 check "blocked exits 3"     "[ $RC -eq 3 ]"
 check "auto-rejecting stderr" "grep -q 'auto-rejecting' '$D/blocked.err'"
 
+echo "== 3b. no sandbox backend =="
+cd "$D"
+mkdir -p fakepath
+for t in bash sh git env uname id cat mkdir touch; do
+  command -v "$t" >/dev/null 2>&1 && ln -sf "$(command -v "$t")" "fakepath/$t"
+done
+OUT=$(PATH="$PWD/fakepath" $BIN run "RUN:touch unsandboxed-marker" --auto --format json 2>"$D/nosandbox.err")
+SID=$(echo "$OUT" | grep -o 'ses_[A-Z0-9]*' | head -1)
+$BIN export "$SID" > "$D/nosandbox.json" 2>/dev/null || true
+check "refuses unsandboxed" "grep -qi 'sandbox backend' '$D/nosandbox.json'"
+check "marker not written"  "test ! -e unsandboxed-marker"
+
 echo "== 4. plan mode =="
 cd "$D"
 OUT=$($BIN run "WRITE:plan-forbidden.txt:x" --agent plan --format json 2>/dev/null)

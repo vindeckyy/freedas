@@ -1242,10 +1242,10 @@ impl Tool for Bash {
             cwd: Some(final_cwd.clone()),
             allow_all_reads,
         };
-        let sandbox_off = !ctx.sandbox
-            || std::env::var("FREEDAS_EXPERIMENTAL_SANDBOX")
-                .map(|v| v == "false" || v == "0")
-                .unwrap_or(false);
+        let opted_out = std::env::var("FREEDAS_EXPERIMENTAL_SANDBOX")
+            .map(|v| v == "false" || v == "0")
+            .unwrap_or(false);
+        let sandbox_off = !ctx.sandbox || opted_out;
         let no_backend_err = |ctx: &ToolContext| -> FreedasError {
             if ctx.config.sandbox.mode == "on" {
                 FreedasError::SandboxUnavailable(
@@ -1267,6 +1267,16 @@ impl Tool for Bash {
             ]
         };
         let wrapped = if sandbox_off {
+            // `!ctx.sandbox` while sandboxing was configured (not mode="off",
+            // not the env opt-out) means no working backend. With nobody to
+            // warn, refuse instead of running bare.
+            if !ctx.sandbox
+                && !opted_out
+                && ctx.config.sandbox.mode != "off"
+                && ctx.approver.is_none()
+            {
+                return Err(no_backend_err(ctx));
+            }
             direct()
         } else {
             // Single-check containment: the wrap result below is what actually
