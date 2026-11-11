@@ -485,7 +485,7 @@ pub async fn run(cli: Cli, project_root: PathBuf) -> Result<i32, Box<dyn std::er
                             "model": model,
                             "inputTokens": input,
                             "outputTokens": output,
-                            "costUSD": cost,
+                            "costUsd": cost,
                         })
                     );
                 }

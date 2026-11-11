@@ -58,7 +58,7 @@ or `FREEDAS_EXPERIMENTAL_SANDBOX=false` to run bare.
 {"type":"message.part.delta","sessionID":"ses_...","text":"..."}
 {"type":"message.part.delta","sessionID":"ses_...","part":{"type":"reasoning","text":"..."}}
 {"type":"message.part.updated","sessionID":"ses_...","messageID":"msg_...","part":{"type":"text","text":"..."}}
-{"type":"usage","sessionID":"ses_...","provider":"anthropic","model":"claude-sonnet-4-5","inputTokens":123,"outputTokens":45,"costUSD":0.0012}
+{"type":"usage","sessionID":"ses_...","provider":"anthropic","model":"claude-sonnet-4-5","inputTokens":123,"outputTokens":45,"costUsd":0.0012}
 {"type":"session.marker","sessionID":"ses_...","marker":"bash"}
 {"type":"tool.result","sessionID":"ses_...","tool":"bash","ok":false,"output":"no sandbox backend; refusing unsandboxed exec"}
 {"type":"permission.asked","sessionID":"ses_...","permissionID":"perm_0","action":"read","resource":".env"}
