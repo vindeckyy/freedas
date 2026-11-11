@@ -390,7 +390,10 @@ pub async fn run(cli: Cli, project_root: PathBuf) -> Result<i32, Box<dyn std::er
                             // channel; asks become blocked.
                             None
                         } else {
-                            Some(std::sync::Arc::new(StdinApprover)
+                            Some(std::sync::Arc::new(StdinApprover {
+                                json_events: (format == "json")
+                                    .then(|| session_id.clone().unwrap_or_default()),
+                            })
                                 as std::sync::Arc<dyn freedas_tools::PermissionApprover>)
                         },
                         session_rules: Default::default(),
@@ -2214,11 +2217,29 @@ fn remove_path_lines(home: &std::path::Path, bin: &std::path::Path) {
 
 /// Minimal stdin approver for interactive/headless `run` (not `--auto`).
 #[derive(Debug)]
-struct StdinApprover;
+struct StdinApprover {
+    /// Session ID when the run uses `--format json`: asked/replied are then
+    /// emitted as JSONL events so scripted consumers see the same schema the
+    /// SSE stream produces.
+    json_events: Option<String>,
+}
 
 impl freedas_tools::PermissionApprover for StdinApprover {
     fn ask(&self, action: &str, resource: &str) -> freedas_tools::PermissionReply {
         use std::io::{BufRead, Write};
+        let perm_id = format!("perm_{}", ulid::Ulid::new());
+        if let Some(sid) = &self.json_events {
+            println!(
+                "{}",
+                serde_json::json!({
+                    "type": "permission.asked",
+                    "sessionID": sid,
+                    "permissionID": perm_id,
+                    "action": action,
+                    "resource": resource,
+                })
+            );
+        }
         // Model-written commands can carry newlines and control chars that
         // would spoof extra prompt lines; flatten and cap before printing.
         let clean = |s: &str| -> String {
@@ -2231,11 +2252,23 @@ impl freedas_tools::PermissionApprover for StdinApprover {
         let _ = std::io::stderr().flush();
         let mut line = String::new();
         let _ = std::io::stdin().lock().read_line(&mut line);
-        match line.trim().to_ascii_lowercase().as_str() {
+        let reply = match line.trim().to_ascii_lowercase().as_str() {
             "y" | "yes" => freedas_tools::PermissionReply::Once,
             "a" | "always" => freedas_tools::PermissionReply::Always,
             _ => freedas_tools::PermissionReply::Reject,
+        };
+        if let Some(sid) = &self.json_events {
+            println!(
+                "{}",
+                serde_json::json!({
+                    "type": "permission.replied",
+                    "sessionID": sid,
+                    "permissionID": perm_id,
+                    "response": format!("{reply:?}").to_lowercase(),
+                })
+            );
         }
+        reply
     }
 }
 
@@ -2534,20 +2567,17 @@ async fn attach_run(opts: AttachRun) -> Result<i32, Box<dyn std::error::Error>> 
                         .into());
                     }
                     "session.idle" => break 'outer,
-                    "session.marker" => {
-                        if !json_mode && let Some(m) = event.get("marker").and_then(|v| v.as_str())
-                        {
+                    "session.marker" if !json_mode => {
+                        if let Some(m) = event.get("marker").and_then(|v| v.as_str()) {
                             eprintln!("{m}");
                         }
                     }
-                    "tool.result" => {
-                        if !json_mode && event["ok"].as_bool() == Some(false) {
-                            eprintln!(
-                                "{} failed: {}",
-                                event["tool"].as_str().unwrap_or("tool"),
-                                event["output"].as_str().unwrap_or("")
-                            );
-                        }
+                    "tool.result" if !json_mode && event["ok"].as_bool() == Some(false) => {
+                        eprintln!(
+                            "{} failed: {}",
+                            event["tool"].as_str().unwrap_or("tool"),
+                            event["output"].as_str().unwrap_or("")
+                        );
                     }
                     _ => {}
                 }
