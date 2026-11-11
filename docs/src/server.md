@@ -103,3 +103,6 @@ may be incomplete.
 - `freedas web` - the SPA served by this server at `/`.
 - `freedas acp` - an ACP client in a separate process speaks to the same session runner.
 - `freedas-relay-server` mirrors these events outward; see [Relay](./relay.md).
+
+The CLI client retries an idempotent read after a transient failure (a 429 or
+a 502 from a proxy); a prompt is never retried, so a second run cannot start.

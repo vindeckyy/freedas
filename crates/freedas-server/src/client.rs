@@ -22,22 +22,56 @@ fn authorized(builder: RequestBuilder) -> RequestBuilder {
     builder
 }
 
+/// How many times an idempotent request is tried before giving up.
+const MAX_ATTEMPTS: u32 = 3;
+
+/// Statuses that mean "try again": a rate limit or a proxy/backend hiccup.
+fn transient_status(status: u16) -> bool {
+    matches!(status, 408 | 425 | 429 | 502 | 503 | 504)
+}
+
+fn backoff(attempt: u32) -> std::time::Duration {
+    std::time::Duration::from_millis(100 * u64::from(attempt))
+}
+
+/// Send one request. A GET is idempotent, so a transient failure is worth
+/// another try; a POST is not - a retried prompt could start a second run.
 pub async fn request(
     client: &Client,
     url: &str,
     method: &str,
     json: Option<&Value>,
 ) -> Result<Value, String> {
-    let mut req = authorized(client.request(method.parse().map_err(|e| format!("{e}"))?, url));
-    if let Some(body) = json {
-        req = req.json(body);
-    }
-    let resp = req.send().await.map_err(|e| e.to_string())?;
-    if !resp.status().is_success() {
+    let idempotent = method.eq_ignore_ascii_case("GET");
+    let mut attempt = 0;
+    loop {
+        attempt += 1;
+        let mut req = authorized(client.request(method.parse().map_err(|e| format!("{e}"))?, url));
+        if let Some(body) = json {
+            req = req.json(body);
+        }
+        let resp = match req.send().await {
+            Ok(resp) => resp,
+            Err(error) => {
+                if idempotent && attempt < MAX_ATTEMPTS {
+                    tokio::time::sleep(backoff(attempt)).await;
+                    continue;
+                }
+                return Err(error.to_string());
+            }
+        };
+        if resp.status().is_success() {
+            return resp.json().await.map_err(|e| e.to_string());
+        }
         let status = resp.status();
+        let retryable = idempotent && attempt < MAX_ATTEMPTS && transient_status(status.as_u16());
         // The server answers {"error": "..."}; keep it — a bare code tells
         // the user nothing.
         let text = resp.text().await.unwrap_or_default();
+        if retryable {
+            tokio::time::sleep(backoff(attempt)).await;
+            continue;
+        }
         let detail = serde_json::from_str::<Value>(&text)
             .ok()
             .and_then(|v| v.get("error").and_then(|e| e.as_str().map(String::from)))
@@ -45,7 +79,6 @@ pub async fn request(
         let detail: String = detail.chars().take(300).collect();
         return Err(format!("http {status}: {detail}"));
     }
-    resp.json().await.map_err(|e| e.to_string())
 }
 
 pub async fn list_sessions(base: &str) -> Result<Vec<Value>, String> {
@@ -103,4 +136,86 @@ pub async fn stream_events(base: &str, on_event: impl AsyncFn(Value)) -> Result<
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    /// A local server that fails the first `failures` requests with 503.
+    async fn flaky(failures: usize) -> (String, Arc<AtomicUsize>) {
+        let hits = Arc::new(AtomicUsize::new(0));
+        let counter = hits.clone();
+        let app = axum::Router::new().route(
+            "/x",
+            axum::routing::any(move || {
+                let counter = counter.clone();
+                async move {
+                    if counter.fetch_add(1, Ordering::SeqCst) < failures {
+                        (StatusCode::SERVICE_UNAVAILABLE, "busy").into_response()
+                    } else {
+                        (StatusCode::OK, "{\"ok\":true}").into_response()
+                    }
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        (format!("http://{addr}/x"), hits)
+    }
+
+    #[tokio::test]
+    async fn a_get_is_retried_after_a_transient_status() {
+        let (url, hits) = flaky(1).await;
+        let value = request(&Client::new(), &url, "GET", None)
+            .await
+            .expect("retried");
+        assert_eq!(value["ok"], serde_json::json!(true));
+        assert_eq!(hits.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn a_get_gives_up_after_the_attempt_budget() {
+        let (url, hits) = flaky(99).await;
+        let error = request(&Client::new(), &url, "GET", None)
+            .await
+            .expect_err("must fail");
+        assert!(error.contains("503"), "got {error}");
+        assert_eq!(hits.load(Ordering::SeqCst), MAX_ATTEMPTS as usize);
+    }
+
+    #[tokio::test]
+    async fn a_post_is_never_retried() {
+        let (url, hits) = flaky(1).await;
+        let error = request(
+            &Client::new(),
+            &url,
+            "POST",
+            Some(&serde_json::json!({"text": "hi"})),
+        )
+        .await
+        .expect_err("must fail");
+        assert!(error.contains("503"), "got {error}");
+        assert_eq!(hits.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn a_client_error_is_not_retried() {
+        let (url, hits) = flaky(0).await;
+        let missing = url.replace("/x", "/missing");
+        let error = request(&Client::new(), &missing, "GET", None)
+            .await
+            .expect_err("must fail");
+        assert!(error.contains("404"), "got {error}");
+        assert_eq!(hits.load(Ordering::SeqCst), 0, "the handler never ran");
+    }
 }
