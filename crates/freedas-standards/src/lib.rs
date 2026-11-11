@@ -319,7 +319,9 @@ mod tests {
     async fn gate_runs_passing_command() {
         let dir = tempfile::tempdir().unwrap();
         let r = run_gate(dir.path(), &["true".to_string()]).await;
-        assert!(r.passed);
+        if !r.passed {
+            panic!("gate failed: {}", r.summary);
+        }
         let r = run_gate(dir.path(), &["false".to_string()]).await;
         assert!(!r.passed);
         assert!(r.summary.contains("gate failed"));
