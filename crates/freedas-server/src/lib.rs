@@ -322,12 +322,32 @@ async fn auth_failure_backoff() {
     tokio::time::sleep(delay).await;
 }
 
-/// A permission request parked until a client answers: the session id and the
-/// channel that unblocks the tool call.
-pub type PendingPerm = (
-    String,
-    std::sync::mpsc::Sender<freedas_tools::PermissionReply>,
-);
+/// A permission request parked until a client answers: the session it belongs
+/// to, what the client has to be told, the id of the `permission.asked`
+/// frame, and the channel that unblocks the tool call.
+#[derive(Debug)]
+pub struct PendingPerm {
+    pub session_id: String,
+    pub action: String,
+    pub resource: String,
+    /// Event id of the `permission.asked` frame. A client that connects
+    /// later is told about the ask again unless it already saw this id.
+    pub event_id: u64,
+    pub reply: std::sync::mpsc::Sender<freedas_tools::PermissionReply>,
+}
+
+impl PendingPerm {
+    /// What a client has to be told about the ask. The reply channel is not
+    /// cloneable, so it stays behind.
+    fn summary(&self) -> (String, String, String, u64) {
+        (
+            self.session_id.clone(),
+            self.action.clone(),
+            self.resource.clone(),
+            self.event_id,
+        )
+    }
+}
 
 /// Answers pending permissions for a session with `Reject`; used when a run is
 /// aborted or its session deleted so a parked tool never waits forever.
@@ -338,12 +358,12 @@ fn drain_pending(
     let mut pending = pending.lock().expect("pending_perms");
     let ids: Vec<String> = pending
         .iter()
-        .filter(|(_, (sid, _))| sid == session_id)
+        .filter(|(_, perm)| perm.session_id == session_id)
         .map(|(id, _)| id.clone())
         .collect();
     for id in ids {
-        if let Some((_, tx)) = pending.remove(&id) {
-            let _ = tx.send(freedas_tools::PermissionReply::Reject);
+        if let Some(perm) = pending.remove(&id) {
+            let _ = perm.reply.send(freedas_tools::PermissionReply::Reject);
         }
     }
 }
@@ -366,21 +386,29 @@ impl freedas_tools::PermissionApprover for SseApprover {
     fn ask(&self, action: &str, resource: &str) -> freedas_tools::PermissionReply {
         let perm_id = format!("perm_{}", ulid::Ulid::new());
         let (tx, rx) = std::sync::mpsc::channel();
-        self.pending
-            .lock()
-            .expect("pending_perms")
-            .insert(perm_id.clone(), (self.session_id.clone(), tx));
-        emit(
-            &self.bus,
-            &self.events,
-            json!({
-                "type": "permission.asked",
-                "sessionID": self.session_id,
-                "permissionID": perm_id,
-                "action": action,
-                "resource": resource,
-            }),
+        // Assign the event id before the ask goes out: the parked entry
+        // carries it so a client that connects later knows whether it already
+        // saw this ask. The entry is in place before the event is sent, so a
+        // fast reply always finds it.
+        let event = self.events.push(json!({
+            "type": "permission.asked",
+            "sessionID": self.session_id,
+            "permissionID": perm_id,
+            "action": action,
+            "resource": resource,
+        }));
+        let event_id = event.get("id").and_then(Value::as_u64).unwrap_or(0);
+        self.pending.lock().expect("pending_perms").insert(
+            perm_id.clone(),
+            PendingPerm {
+                session_id: self.session_id.clone(),
+                action: action.to_owned(),
+                resource: resource.to_owned(),
+                event_id,
+                reply: tx,
+            },
         );
+        let _ = self.bus.send(event);
         // The reply arrives on a plain channel from another task. `block_in_place`
         // keeps the async worker from stalling; on a single-threaded runtime
         // there is no worker to hand off to, so wait directly.
@@ -401,7 +429,7 @@ impl freedas_tools::PermissionApprover for SseApprover {
         if let Ok(mut pending) = self.pending.lock()
             && pending
                 .get(&perm_id)
-                .map(|(sid, _)| sid == &self.session_id)
+                .map(|perm| perm.session_id == self.session_id)
                 .unwrap_or(false)
         {
             pending.remove(&perm_id);
@@ -738,12 +766,12 @@ impl Drop for RunGuard {
         if let Ok(mut pending) = self.pending.lock() {
             let ids: Vec<String> = pending
                 .iter()
-                .filter(|(_, (sid, _))| sid == &self.id)
+                .filter(|(_, perm)| perm.session_id == self.id)
                 .map(|(id, _)| id.clone())
                 .collect();
             for id in ids {
-                if let Some((_, tx)) = pending.remove(&id) {
-                    let _ = tx.send(freedas_tools::PermissionReply::Reject);
+                if let Some(perm) = pending.remove(&id) {
+                    let _ = perm.reply.send(freedas_tools::PermissionReply::Reject);
                 }
             }
         }
@@ -1616,9 +1644,36 @@ async fn sse_events(
             serde_json::to_string(&json!({"type": "server.connected"})).unwrap_or_default(),
         ));
         let mut sent = last.unwrap_or(0);
+        let replayed: std::collections::HashSet<u64> = replay
+            .iter()
+            .filter_map(|event| event.get("id").and_then(Value::as_u64))
+            .collect();
         for event in replay {
             sent = sent.max(event.get("id").and_then(Value::as_u64).unwrap_or(0));
             yield Ok(sse_event(&event));
+        }
+        // A parked permission ask this client never saw would leave the run
+        // waiting out the ten-minute timeout: hand it over now. The replay
+        // above already covered the asks inside the retained window, so only
+        // the ones it missed are sent again.
+        let parked: Vec<(String, (String, String, String, u64))> = s
+            .pending_perms
+            .lock()
+            .expect("pending_perms")
+            .iter()
+            .map(|(id, perm)| (id.clone(), perm.summary()))
+            .collect();
+        for (perm_id, (session_id, action, resource, event_id)) in parked {
+            if event_id <= sent || replayed.contains(&event_id) {
+                continue;
+            }
+            yield Ok(sse_event(&json!({
+                "type": "permission.asked",
+                "sessionID": session_id,
+                "permissionID": perm_id,
+                "action": action,
+                "resource": resource,
+            })));
         }
         loop {
             match rx.recv().await {
@@ -1737,7 +1792,68 @@ pub async fn serve(host: &str, port: u16) -> std::io::Result<()> {
 mod tests {
     use super::*;
     use axum::body::Body;
+    use axum::http::HeaderMap;
+    use axum::response::IntoResponse;
+    use futures::StreamExt;
     use tower::ServiceExt;
+
+    /// Read the frames the SSE stream sends before it waits for live events.
+    async fn sse_frames(state: AppState, last_event_id: Option<u64>) -> String {
+        let mut headers = HeaderMap::new();
+        if let Some(id) = last_event_id {
+            headers.insert("last-event-id", id.to_string().parse().expect("id"));
+        }
+        let response = sse_events(State(state), headers).await.into_response();
+        let mut stream = response.into_body().into_data_stream();
+        let mut text = String::new();
+        for _ in 0..4 {
+            let chunk =
+                tokio::time::timeout(std::time::Duration::from_millis(500), stream.next()).await;
+            match chunk {
+                Ok(Some(Ok(bytes))) => text.push_str(&String::from_utf8_lossy(&bytes)),
+                _ => break,
+            }
+        }
+        text
+    }
+
+    fn park_permission(state: &AppState, event_id: u64) {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        state.pending_perms.lock().expect("pending_perms").insert(
+            "perm_1".into(),
+            PendingPerm {
+                session_id: "ses_1".into(),
+                action: "bash".into(),
+                resource: "git push".into(),
+                event_id,
+                reply: tx,
+            },
+        );
+    }
+
+    /// A client that connects while a permission is parked never saw the
+    /// ask: without it the run waits out the ten-minute timeout.
+    #[tokio::test]
+    async fn a_connecting_client_is_told_about_a_parked_permission() {
+        let (_dir, db, paths) = setup();
+        let state = AppState::new(db, paths);
+        park_permission(&state, 7);
+        let text = sse_frames(state, None).await;
+        assert!(text.contains("permission.asked"), "{text}");
+        assert!(text.contains("perm_1"), "{text}");
+        assert!(text.contains("git push"), "{text}");
+    }
+
+    /// A client that already received the ask must not be asked again.
+    #[tokio::test]
+    async fn a_client_that_saw_the_ask_is_not_told_again() {
+        let (_dir, db, paths) = setup();
+        let state = AppState::new(db, paths);
+        park_permission(&state, 7);
+        let text = sse_frames(state, Some(7)).await;
+        assert!(text.contains("server.connected"), "{text}");
+        assert!(!text.contains("permission.asked"), "{text}");
+    }
 
     fn setup() -> (tempfile::TempDir, Arc<Db>, Paths) {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -2079,7 +2195,7 @@ async fn reply_permission(
     };
     let mut pending = s.pending_perms.lock().expect("pending_perms");
     match pending.get(&perm) {
-        Some((sid, _)) if sid == &session_id => {}
+        Some(p) if p.session_id == session_id => {}
         Some(_) => {
             return Err((
                 StatusCode::CONFLICT,
@@ -2088,8 +2204,8 @@ async fn reply_permission(
         }
         None => return Err(missing("unknown or answered permission")),
     }
-    let (_, tx) = pending.remove(&perm).expect("checked above");
-    let _ = tx.send(reply);
+    let perm = pending.remove(&perm).expect("checked above");
+    let _ = perm.reply.send(reply);
     Ok(Json(json!({"ok": true})))
 }
 

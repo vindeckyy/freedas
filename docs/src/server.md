@@ -87,6 +87,11 @@ All JSON, camelCase.
 applicable. Usage totals are pulled from `GET /session/{id}/usage` rather
 than streamed.
 
+A client that connects while a permission request is still parked is sent
+that `permission.asked` event, unless it already received it - the frame is
+repeated without an `id`, so the client's replay position does not move past
+events it has not seen.
+
 ## Clients
 
 - `freedas attach <url>` - a live read-only transcript view of a running server.
