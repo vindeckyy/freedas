@@ -1605,20 +1605,20 @@ pub async fn run(cli: Cli, project_root: PathBuf) -> Result<i32, Box<dyn std::er
                         }
                     }
                     "permission.asked" => println!(
-                        "[permission] {} {}",
-                        event.get("action").and_then(|v| v.as_str()).unwrap_or(""),
-                        event.get("resource").and_then(|v| v.as_str()).unwrap_or("")
+                        "[permission] {} {} — parked; answer via the web UI or POST /session/{{id}}/permission",
+                        flat(event.get("action").and_then(|v| v.as_str()).unwrap_or("")),
+                        flat(event.get("resource").and_then(|v| v.as_str()).unwrap_or(""))
                     ),
                     "session.marker" => {
                         if let Some(m) = event.get("marker").and_then(|v| v.as_str()) {
-                            println!("[{m}]");
+                            println!("[{}]", flat(m));
                         }
                     }
                     "tool.result" => {
                         if event.get("ok").and_then(|v| v.as_bool()) == Some(false) {
                             println!(
                                 "[tool failed] {}: {}",
-                                event.get("tool").and_then(|v| v.as_str()).unwrap_or("tool"),
+                                flat(event.get("tool").and_then(|v| v.as_str()).unwrap_or("tool")),
                                 event.get("output").and_then(|v| v.as_str()).unwrap_or("")
                             );
                         }
