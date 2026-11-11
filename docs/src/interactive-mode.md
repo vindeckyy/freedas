@@ -72,7 +72,12 @@ to the global config:
 
 - `/new` starts a session; `/sessions` or `Ctrl+K` switches, forks, renames, deletes, or exports.
 - `freedas --continue` resumes the most recent session; `freedas --session <id>` resumes a specific one; `--fork` with either creates a forked copy first.
-- `/undo` and `/redo` restore files from shadow-git snapshots.
+- `/undo` and `/redo` restore files from shadow-git snapshots. The snapshot
+  is taken just before the first file-mutating tool call of a message, so
+  read-only messages create none. If the project root contains the Freedas
+  data directory (for example launching in your home directory) or exceeds
+  the size caps, the snapshot is skipped and `/undo` is unavailable for
+  that message — the run itself still proceeds.
 
 ## Non-interactive terminals
 

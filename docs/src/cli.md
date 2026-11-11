@@ -228,5 +228,7 @@ Remove the binary, PATH line, and data/state/cache after confirmation.
 | `FREEDAS_PLUGIN_TRUST=1` | Record a process plugin's hash (first load or after change) |
 | `FREEDAS_RELEASE_BASE` | Release mirror for install/upgrade |
 | `FREEDAS_TEST_PROVIDER=fake` | Offline fake provider for tests |
+| `FREEDAS_TUI_TIMING=1` | Print TUI startup stage timings to stderr |
+| `FREEDAS_DUMP_REQUEST=1` | Fake provider: print system/message/tool byte sizes per request |
 | `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`/`GOOGLE_API_KEY`, `OPENROUTER_API_KEY`, `DEEPSEEK_API_KEY`, `OPENCODE_API_KEY` | Provider credentials |
 

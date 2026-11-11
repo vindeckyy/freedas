@@ -13,7 +13,7 @@ means the product deliberately does not implement it.
 | One-command install, no sudo, macOS/Linux/WSL | `install.sh`, `~/.freedas/bin/freedas`, `freedas upgrade`/`uninstall` | Partial: `install.sh` and upgrade path are in; release artifacts (cargo-dist builds, `latest.json` hosting) are not wired up |
 | Interactive terminal UI | `freedas-tui` (ratatui/crossterm): streaming transcript, tool cards, diffs, permission dialogs, pickers, config panel | Implemented |
 | Sessions, resume, fork, rename, delete, export, import | SQLite store, `/new`/`/sessions`/`/rename`/`/fork`/`/export`/`/move`, `session fork/rename/delete`, JSON export/import with `--sanitize` | Implemented |
-| Undo/redo file edits | Shadow-git snapshots per message and per write batch; `/undo`, `/redo` | Implemented |
+| Undo/redo file edits | Lazy shadow-git snapshots (before a message's first mutation); `/undo`, `/redo` | Implemented |
 | Context compaction | Compaction on `small_model` at ~80% context and `/compact`; `compaction` parts, `kind=compaction` usage | Implemented |
 | Plan modes | `plan`, `plan-quick` read-only agents; `/deep-plan`, `/quick-plan`; plan artifact writes under `plans/` | Implemented |
 | Permissions | `freedas-permission` engine: allow/ask/deny, globs, remembered rules, agent rules, shell scanner, catastrophic deny list | Implemented |

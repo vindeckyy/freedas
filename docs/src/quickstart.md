@@ -67,7 +67,9 @@ change the mode with `/permissions`. See [Permissions](./permissions.md).
 
 `/undo` reverts the last message and its file edits; `/redo` puts them back.
 Snapshots live outside the project in a shadow git repository, so your real
-index and HEAD are never touched.
+index and HEAD are never touched. A snapshot is captured lazily right before
+a message's first file mutation; it is skipped (undo unavailable) when the
+root contains the Freedas data directory or is too large to scan safely.
 
 ## Commit and open a pull request
 

@@ -62,7 +62,7 @@ freedas run "add a test for parse_args" --auto
 |---|---|
 | Terminal UI | `freedas` (streaming transcript, tool cards, permission dialogs, slash commands) |
 | Sessions | `freedas session list|delete|fork|rename`, `/new`, `/sessions`, `/compact`, `/move` |
-| Undo and redo | `/undo`, `/redo` (shadow-git snapshots per message) |
+| Undo and redo | `/undo`, `/redo` (lazy shadow-git snapshots, taken before the first mutation of a message) |
 | Permissions | ask/allow/deny rules, `--auto`, `--manual`, remembered answers, shell scanner |
 | Local sandbox | macOS `sandbox-exec`, Linux `bwrap`; headless is sandboxed by default |
 | Agents | `build`, `plan`, `plan-quick`, `explore`, `general`, custom Markdown agents |

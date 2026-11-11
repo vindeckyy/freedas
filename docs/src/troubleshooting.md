@@ -43,6 +43,12 @@ more with `grep -rn "your message" crates/`.
 - **`cancelled` in the transcript**
   The run was interrupted (Ctrl+C, `/exit`, abort). The session is kept;
   resume with `-c` or `freedas run -c`.
+- **`/undo` says there is nothing to undo after a write run**
+  The snapshot was skipped: the project root contains the Freedas data
+  directory (for example you launched in `~`) or exceeds the file/size caps.
+  The run itself completed; move the project or launch from a smaller root
+  to get undo back. Snapshot `git` work is also bounded by a 120s timeout
+  and the run's cancellation, so a slow tree can no longer freeze the TUI.
 
 ## Models and providers
 
@@ -117,4 +123,6 @@ more with `grep -rn "your message" crates/`.
 - `freedas debug paths` - every directory in use (config, data, state, cache, logs).
 - `/debug` in the TUI - config paths, provider status, MCP/LSP status, last error.
 - `RUST_LOG=freedas=debug` - session runner logs to stderr.
+- `FREEDAS_TUI_TIMING=1` - per-stage startup timings (paths, db, config, discovery) on stderr.
+- `FREEDAS_DUMP_REQUEST=1` - with `FREEDAS_TEST_PROVIDER=fake`, prints each request's system/message/tool byte sizes.
 - `~/.local/share/freedas/freedas.db` - sessions, messages, parts, usage; inspect with `sqlite3`.
