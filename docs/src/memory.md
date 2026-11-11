@@ -57,7 +57,8 @@ freedas memory export          # write all records to stdout
 Commands are scoped to the current project by default — `forget` refuses to
 delete another project's records without `--global` — and `list`/`show`
 output passes through the redactor. Deleting a record leaves a tombstone so
-it is not re-distilled.
+it is not re-distilled, re-imported, or re-added by the agent's `memory`
+tool.
 
 ## Config
 

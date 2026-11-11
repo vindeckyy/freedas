@@ -1684,6 +1684,13 @@ impl Tool for MemoryTool {
                     ));
                 }
                 if let (Some(db), Some(project_id)) = (&ctx.db, &ctx.project_id) {
+                    // A forgotten memory stays forgotten: the tombstone blocks
+                    // a re-add, the same gate `Memory::remember` applies.
+                    if db.memory_tombstoned(&redacted) {
+                        return Err(FreedasError::Tool(
+                            "memory was forgotten; not stored again".into(),
+                        ));
+                    }
                     db.add_memory("project", Some(project_id.as_str()), kind, &redacted, 0.8)?;
                 }
                 format!("remembered ({kind}): {redacted}")
@@ -2782,6 +2789,61 @@ mod tests {
                 "{target}: {err:?}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn memory_tool_stores_a_memory() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let db = Arc::new(freedas_db::Db::memory().unwrap());
+        let project_id = db.ensure_project(&root).unwrap();
+        let mut ctx = test_ctx(&root, true);
+        ctx.db = Some(db.clone());
+        ctx.project_id = Some(project_id.clone());
+
+        let text = "the api uses graphql for every query";
+        let out = MemoryTool
+            .execute(
+                &json!({"action": "add", "kind": "fact", "text": text}),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        assert!(out.content.contains("remembered"), "{}", out.content);
+        assert_eq!(
+            db.recall_memory(Some(&project_id), 10).unwrap(),
+            vec![text.to_string()]
+        );
+    }
+
+    #[tokio::test]
+    async fn memory_tool_refuses_a_forgotten_memory() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let db = Arc::new(freedas_db::Db::memory().unwrap());
+        let project_id = db.ensure_project(&root).unwrap();
+        let mut ctx = test_ctx(&root, true);
+        ctx.db = Some(db.clone());
+        ctx.project_id = Some(project_id.clone());
+
+        let text = "the api uses graphql for every query";
+        let id = db
+            .add_memory("project", Some(&project_id), "fact", text, 0.8)
+            .unwrap();
+        assert!(db.delete_memory(&id).unwrap());
+
+        let err = MemoryTool
+            .execute(
+                &json!({"action": "add", "kind": "fact", "text": text}),
+                &ctx,
+            )
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("forgotten"), "{err:?}");
+        assert!(
+            db.recall_memory(Some(&project_id), 10).unwrap().is_empty(),
+            "a forgotten memory must not come back"
+        );
     }
 
     #[tokio::test]
