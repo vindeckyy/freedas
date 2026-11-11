@@ -763,6 +763,14 @@ fn spawn_run(s: &AppState, id: String, request: RunRequest) -> Result<(), ApiErr
                                         "marker": chunk.trim_start_matches('\u{1}'),
                                     }),
                                 );
+                            } else if let Some(json) = chunk.strip_prefix('\u{2}') {
+                                // Tool results were leaking into text deltas as
+                                // raw \u{2}-prefixed JSON.
+                                if let Ok(mut v) = serde_json::from_str::<serde_json::Value>(json) {
+                                    v["type"] = "tool.result".into();
+                                    v["sessionID"] = session_id.clone().into();
+                                    emit(&bus, &events, v);
+                                }
                             } else {
                                 emit(
                                     &bus,
