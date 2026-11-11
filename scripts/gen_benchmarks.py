@@ -11,7 +11,7 @@ import subprocess
 import html as H
 
 W = 848
-LEFT, BAR_W, ROW_H, BH = 152, 438, 28, 19
+LEFT, BAR_W, ROW_H, BH = 245, 465, 28, 19
 FONT = "ui-sans-serif,system-ui,-apple-system,'Segoe UI',Roboto,sans-serif"
 
 
@@ -86,9 +86,9 @@ FOOTPRINT = [
       ("Claude Code --bare", 1265, False, True),
       ("freedas \u00b7 17 tools", 1350, True, False),
       ("Pi \u00b7 default", 1641, False, False),
-      ("Claude Code \u00b7 4 tools, short prompt", 2072, False, False),
+      ("Claude Code \u00b7 4 tools + short sys", 2072, False, False),
       ("Claude Code \u00b7 4 tools", 3316, False, False),
-      ("Claude Code default \u00b7 21 tools", 17398, False, False),
+      ("Claude Code \u00b7 21 tools (default)", 17398, False, False),
       ("Codex CLI", 19551, False, False)],
      "Tokens sent for a trivial request, full toolset unless noted. freedas "
      "measured via FREEDAS_DUMP_REQUEST with an empty HOME (~1.4k tokens incl. "
@@ -163,26 +163,31 @@ def render_chart(title, unit, log, chip_override, rows, note, C, y0):
                 f'fill="{C["chip_t"]}" font-size="10.5" font-weight="700">'
                 f'{esc(chip_txt)}</text>')
     y += len(rows) * ROW_H + 6
-    # wrap note into ~2 lines at 88 chars
+    # wrap note into lines at ~95 chars; all lines render, height tracks them
     words, lines, cur = note.split(), [], ""
     for wd in words:
-        if len(cur) + len(wd) + 1 > 92:
+        if len(cur) + len(wd) + 1 > 95:
             lines.append(cur)
             cur = wd
         else:
             cur = f"{cur} {wd}" if cur else wd
     lines.append(cur)
-    for j, ln in enumerate(lines[:3]):
+    for j, ln in enumerate(lines):
         out.append(
             f'<text x="{LEFT}" y="{y+12+j*14}" fill="{C["mut"]}" font-size="10">'
             f'{esc(ln)}</text>')
-    return "".join(out), y + 14 + len(lines[:3]) * 14 + 12
+    return "".join(out), y + 14 + len(lines) * 14 + 14
 
 
 def figure(C, charts, title, subtitle, path):
-    heights = [26 + len(c[4]) * ROW_H + 20 + min(3, len(c[5].split()) // 12 + 1) * 14 + 14
-               for c in charts]
-    total = 80 + sum(heights) + 10 * (len(charts) - 1) + 30
+    # Render chart chunks first so the svg height is exact, not estimated.
+    chunks, seps, y = [], [], 84
+    for t, unit, log, chip, rows, note in charts:
+        chunk, y = render_chart(t, unit, log, chip, rows, note, C, y)
+        chunks.append(chunk)
+        seps.append(y + 6)
+        y += 10
+    total = y + 24
     out = [
         f'<svg xmlns="http://www.w3.org/2000/svg" width="{W}" height="{total}" '
         f'viewBox="0 0 {W} {total}" font-family="{FONT}" role="img" '
@@ -196,13 +201,11 @@ def figure(C, charts, title, subtitle, path):
         f'{esc(title)}</text>',
         f'<text x="28" y="60" fill="{C["mut"]}" font-size="12">{esc(subtitle)}</text>',
     ]
-    y = 84
-    for i, (t, unit, log, chip, rows, note) in enumerate(charts):
-        chunk, y = render_chart(t, unit, log, chip, rows, note, C, y)
+    for i, chunk in enumerate(chunks):
         out.append(chunk)
-        if i < len(charts) - 1:
+        if i < len(chunks) - 1:
             out.append(
-                f'<line x1="28" y1="{y+4}" x2="{W-28}" y2="{y+4}" '
+                f'<line x1="28" y1="{seps[i]}" x2="{W-28}" y2="{seps[i]}" '
                 f'stroke="{C["edge"]}" stroke-width="1"/>')
     out.append("</svg>")
     open(path, "w").write("".join(out))
