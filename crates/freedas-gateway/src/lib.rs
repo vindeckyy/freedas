@@ -1499,11 +1499,145 @@ mod tests {
     use wiremock::matchers::{header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
+    /// The control-plane tables the gateway meters against. Mirrors
+    /// `freedas_control::MIGRATIONS`; the control plane's own schema wins when
+    /// both are present in the same database.
+    const SCHEMA: &[&str] = &[
+        "CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, email TEXT NOT NULL UNIQUE, name TEXT NOT NULL, password_hash TEXT, oidc_sub TEXT UNIQUE, active BOOLEAN NOT NULL DEFAULT TRUE, created_at BIGINT NOT NULL)",
+        "CREATE TABLE IF NOT EXISTS workspaces (id TEXT PRIMARY KEY, slug TEXT NOT NULL UNIQUE, name TEXT NOT NULL, kind TEXT NOT NULL, owner_id TEXT REFERENCES users(id), settings JSONB NOT NULL DEFAULT '{}'::jsonb, created_at BIGINT NOT NULL)",
+        "CREATE TABLE IF NOT EXISTS api_tokens (id TEXT PRIMARY KEY, user_id TEXT REFERENCES users(id) ON DELETE CASCADE, workspace_id TEXT REFERENCES workspaces(id) ON DELETE CASCADE, token_hash TEXT NOT NULL UNIQUE, scopes TEXT, last_used_at BIGINT, expires_at BIGINT, revoked_at BIGINT, created_at BIGINT NOT NULL)",
+        "CREATE TABLE IF NOT EXISTS wallet_ledger (id TEXT PRIMARY KEY, workspace_id TEXT REFERENCES workspaces(id) ON DELETE CASCADE, delta_usd NUMERIC(12,6) NOT NULL, reason TEXT NOT NULL, ref TEXT, created_at BIGINT NOT NULL)",
+        "CREATE TABLE IF NOT EXISTS budgets (id TEXT PRIMARY KEY, workspace_id TEXT REFERENCES workspaces(id) ON DELETE CASCADE, scope TEXT NOT NULL CHECK (scope IN ('workspace','user','team')), subject_id TEXT, limit_usd NUMERIC(12,6) NOT NULL, period TEXT NOT NULL CHECK (period IN ('monthly','total')), created_at BIGINT NOT NULL)",
+        "CREATE TABLE IF NOT EXISTS usage_events (id TEXT PRIMARY KEY, workspace_id TEXT REFERENCES workspaces(id) ON DELETE CASCADE, user_id TEXT REFERENCES users(id), session_id TEXT, kind TEXT NOT NULL, provider TEXT, model TEXT, input_tokens BIGINT NOT NULL DEFAULT 0, output_tokens BIGINT NOT NULL DEFAULT 0, cost_usd NUMERIC(12,6) NOT NULL DEFAULT 0, created_at BIGINT NOT NULL)",
+        "CREATE TABLE IF NOT EXISTS session_metadata (session_id TEXT PRIMARY KEY, workspace_id TEXT REFERENCES workspaces(id) ON DELETE CASCADE, user_id TEXT REFERENCES users(id), project TEXT, model TEXT, input_tokens BIGINT NOT NULL DEFAULT 0, output_tokens BIGINT NOT NULL DEFAULT 0, cost_usd NUMERIC(12,6) NOT NULL DEFAULT 0, files_read JSONB NOT NULL DEFAULT '[]'::jsonb, prompt_excerpt TEXT, started_at BIGINT NOT NULL, ended_at BIGINT)",
+        "CREATE TABLE IF NOT EXISTS teams (id TEXT PRIMARY KEY, workspace_id TEXT REFERENCES workspaces(id) ON DELETE CASCADE, name TEXT NOT NULL, created_at BIGINT NOT NULL)",
+        "CREATE TABLE IF NOT EXISTS team_members (team_id TEXT REFERENCES teams(id) ON DELETE CASCADE, user_id TEXT REFERENCES users(id) ON DELETE CASCADE, PRIMARY KEY (team_id, user_id))",
+    ];
+
+    /// A pool for the tests that need the control-plane database. Without
+    /// Postgres they skip instead of failing.
+    async fn pg() -> Option<sqlx::PgPool> {
+        let url = std::env::var("FREEDAS_PG_URL")
+            .or_else(|_| std::env::var("DATABASE_URL"))
+            .ok()?;
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .acquire_timeout(std::time::Duration::from_secs(2))
+            .connect(&url)
+            .await
+            .ok()?;
+        for statement in SCHEMA {
+            sqlx::query(statement).execute(&pool).await.ok()?;
+        }
+        Some(pool)
+    }
+
     async fn body_json(response: Response) -> Value {
         let bytes = to_bytes(response.into_body(), usize::MAX)
             .await
             .expect("body");
         serde_json::from_slice(&bytes).expect("json")
+    }
+
+    /// The money path: a chat completion must be recorded against the
+    /// workspace and the wallet debited by the metered cost.
+    #[tokio::test]
+    async fn meters_a_chat_completion_against_the_wallet() {
+        let Some(pool) = pg().await else {
+            return;
+        };
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_raw(
+                r#"{"id":"c1","choices":[{"message":{"content":"hi"}}],"usage":{"prompt_tokens":100,"completion_tokens":50}}"#,
+                "application/json",
+            ))
+            .mount(&server)
+            .await;
+
+        let workspace = format!("ws_{}", ulid::Ulid::new());
+        let token = format!("gateway-test-{}", ulid::Ulid::new());
+        sqlx::query(
+            "INSERT INTO workspaces (id, slug, name, kind, created_at)
+             VALUES ($1, $1, 'Gateway Test', 'organization', 1)",
+        )
+        .bind(&workspace)
+        .execute(&pool)
+        .await
+        .expect("workspace");
+        sqlx::query(
+            "INSERT INTO wallet_ledger (id, workspace_id, delta_usd, reason, ref, created_at)
+             VALUES ($1, $2, 10.0, 'credit', $3, 1)",
+        )
+        .bind(format!("led_{}", ulid::Ulid::new()))
+        .bind(&workspace)
+        .bind(&workspace)
+        .execute(&pool)
+        .await
+        .expect("credit");
+        sqlx::query(
+            "INSERT INTO api_tokens (id, user_id, workspace_id, token_hash, scopes, created_at)
+             VALUES ($1, NULL, $2, $3, '{model}', 1)",
+        )
+        .bind(format!("tok_{}", ulid::Ulid::new()))
+        .bind(&workspace)
+        .bind(hash_token(&token))
+        .execute(&pool)
+        .await
+        .expect("token");
+
+        let state = AppState::new(format!("{}/v1", server.uri()), Some(pool.clone()))
+            .with_upstream_key("openai", "sk-upstream");
+        let app = app_with_state(state);
+        let request = Request::builder()
+            .method("POST")
+            .uri("/v1/chat/completions")
+            .header("authorization", format!("Bearer {token}"))
+            .header("content-type", "application/json")
+            .body(Body::from(
+                r#"{"model":"openai/gpt-4o-mini","messages":[{"role":"user","content":"hi"}]}"#,
+            ))
+            .unwrap();
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let (input_tokens, cost): (i64, f64) = sqlx::query_as(
+            "SELECT input_tokens, cost_usd::float8 FROM usage_events WHERE workspace_id = $1",
+        )
+        .bind(&workspace)
+        .fetch_one(&pool)
+        .await
+        .expect("usage event");
+        assert_eq!(input_tokens, 100);
+        assert!(cost > 0.0, "the call must cost something: {cost}");
+
+        // The wallet is debited by the metered cost, not by the estimate.
+        let balance: f64 = sqlx::query_scalar(
+            "SELECT COALESCE(SUM(delta_usd), 0)::float8 FROM wallet_ledger WHERE workspace_id = $1",
+        )
+        .bind(&workspace)
+        .fetch_one(&pool)
+        .await
+        .expect("balance");
+        assert!(balance < 10.0, "the wallet must be debited: {balance}");
+        assert!(
+            balance > 9.99,
+            "the debit must be the metered cost: {balance}"
+        );
+
+        // Leave no rows behind: the test database is shared.
+        for statement in [
+            "DELETE FROM usage_events WHERE workspace_id = $1",
+            "DELETE FROM wallet_ledger WHERE workspace_id = $1",
+            "DELETE FROM api_tokens WHERE workspace_id = $1",
+            "DELETE FROM workspaces WHERE id = $1",
+        ] {
+            sqlx::query(statement)
+                .bind(&workspace)
+                .execute(&pool)
+                .await
+                .expect("cleanup");
+        }
     }
 
     #[tokio::test]

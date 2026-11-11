@@ -102,6 +102,9 @@ jobs:
       # The control-plane tests need a real database. They share one, so they
       # run one at a time: one of them drops the auth tables.
       - run: cargo test --locked -p freedas-control -- --include-ignored --test-threads=1
+      # The gateway meters against the same tables; without a database its
+      # database-backed test skips.
+      - run: cargo test --locked -p freedas-gateway
 
   e2e:
     name: e2e (${{ matrix.os }})
