@@ -23,10 +23,11 @@ check "debug paths"    "$BIN debug paths | grep -q data"
 
 echo "== 2. headless CI =="
 cd "$D"
-OUT=$($BIN run "WRITE:hello.txt:world" --auto --format json 2>/dev/null)
+OUT=$($BIN run "WRITE:hello.txt:world" --auto --format json 2>"$D/write.err")
 check "jsonl result"        "echo '$OUT' | grep -q '\"completed\":true'"
 check "session.started evt" "echo '$OUT' | grep -q 'session.started'"
 check "file written"        "test -f hello.txt && grep -q world hello.txt"
+[ -s "$D/write.err" ] && sed 's/^/  write stderr: /' "$D/write.err"
 
 echo "== 3. permissions =="
 cd "$D"

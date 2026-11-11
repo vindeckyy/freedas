@@ -2075,6 +2075,9 @@ fn browser_dirs() -> BrowserDirs {
     let path_dirs = std::env::var_os("PATH")
         .map(|p| std::env::split_paths(&p).collect())
         .unwrap_or_default();
+    #[cfg(not(target_os = "macos"))]
+    let exe_paths = Vec::new();
+    #[cfg(target_os = "macos")]
     let mut exe_paths = Vec::new();
     #[cfg(target_os = "macos")]
     {
