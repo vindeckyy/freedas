@@ -8,7 +8,7 @@ fn project_config_disabled() -> bool {
         .unwrap_or(false)
 }
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -42,6 +42,9 @@ struct Session {
     cwd: PathBuf,
     agent: String,
     model: Option<String>,
+    /// Creation order; the oldest idle session is the one that gets evicted
+    /// when the session map is full.
+    seq: u64,
     /// Rules granted with "allow always" for the rest of the session.
     rules: Arc<Mutex<Vec<PermissionRule>>>,
     /// Rules granted with "allow once": consumed by the next permission check.
@@ -54,6 +57,7 @@ impl Session {
             cwd: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             agent: "build".into(),
             model: None,
+            seq: 0,
             rules: Arc::new(Mutex::new(Vec::new())),
             once: Arc::new(Mutex::new(Vec::new())),
         }
@@ -167,6 +171,8 @@ impl Drop for CancelSlot {
 pub struct AcpServer {
     db: Arc<Db>,
     sessions: HashMap<String, Session>,
+    /// Creation counter for sessions; drives the eviction order.
+    next_session: u64,
     cancels: Arc<Mutex<HashMap<String, tokio_util::sync::CancellationToken>>>,
     pending: Arc<std::sync::Mutex<Vec<String>>>,
     /// Permission requests awaiting a client answer, keyed by request ID.
@@ -192,6 +198,7 @@ impl AcpServer {
             db,
             allowed_roots: vec![launch],
             sessions: HashMap::new(),
+            next_session: 0,
             cancels: Arc::new(Mutex::new(HashMap::new())),
             pending: Arc::new(std::sync::Mutex::new(Vec::new())),
             permissions: HashMap::new(),
@@ -278,9 +285,6 @@ impl AcpServer {
     }
 
     fn new_session(&mut self, id: Value, params: &Value) -> Vec<String> {
-        if self.sessions.len() >= MAX_SESSIONS {
-            return vec![rpc_error(id, -32000, "too many sessions".into())];
-        }
         let cwd = params
             .get("cwd")
             .and_then(Value::as_str)
@@ -325,6 +329,9 @@ impl AcpServer {
             Ok(project_id) => project_id,
             Err(error) => return vec![rpc_error(id, -32603, error.to_string())],
         };
+        if !self.reserve_session_slot() {
+            return vec![rpc_error(id, -32000, "too many sessions".into())];
+        }
         let session_id = match self
             .db
             .create_session(&project_id, &agent, "ACP session", None)
@@ -332,16 +339,50 @@ impl AcpServer {
             Ok(session_id) => session_id,
             Err(error) => return vec![rpc_error(id, -32603, error.to_string())],
         };
+        self.next_session += 1;
         self.sessions.insert(
             session_id.clone(),
             Session {
                 cwd,
                 agent,
                 model,
+                seq: self.next_session,
                 ..Session::fallback()
             },
         );
         vec![response(id, json!({ "sessionId": session_id }))]
+    }
+
+    /// Make room for one more session. The oldest idle session is forgotten
+    /// rather than the request refused: refusing would wedge the server for
+    /// the life of the process, since nothing ever closes an ACP session.
+    /// Returns false when every session is busy.
+    fn reserve_session_slot(&mut self) -> bool {
+        if self.sessions.len() < MAX_SESSIONS {
+            return true;
+        }
+        let busy: HashSet<String> = {
+            let cancels = self.cancels.lock().expect("cancels");
+            cancels.keys().cloned().collect()
+        };
+        let parked: HashSet<String> = self
+            .permissions
+            .values()
+            .map(|pending| pending.session_id.clone())
+            .collect();
+        let oldest = self
+            .sessions
+            .iter()
+            .filter(|(id, _)| !busy.contains(id.as_str()) && !parked.contains(id.as_str()))
+            .min_by_key(|(_, session)| session.seq)
+            .map(|(id, _)| id.clone());
+        match oldest {
+            Some(id) => {
+                self.sessions.remove(&id);
+                true
+            }
+            None => false,
+        }
     }
 
     fn load_session(&mut self, id: Value, params: &Value) -> Vec<String> {
@@ -384,11 +425,16 @@ impl AcpServer {
                     {
                         return vec![rpc_error(id, -32602, format!("unknown agent: {agent}"))];
                     }
+                    if !self.reserve_session_slot() {
+                        return vec![rpc_error(id, -32000, "too many sessions".into())];
+                    }
+                    self.next_session += 1;
                     self.sessions.insert(
                         session_id.to_string(),
                         Session {
                             cwd,
                             agent,
+                            seq: self.next_session,
                             ..Session::fallback()
                         },
                     );
@@ -1860,6 +1906,96 @@ mod tests {
         let message = out[0]["error"]["message"].as_str().unwrap_or_default();
         assert!(message.contains("too many terminals"), "got {message}");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The session cap must not wedge the server: an idle session is evicted
+    /// instead of the next request being refused for the life of the process.
+    #[tokio::test]
+    async fn the_session_cap_evicts_idle_sessions() {
+        let mut server = server();
+        let dir = std::env::temp_dir();
+        let mut oldest = String::new();
+        for i in 0..MAX_SESSIONS {
+            let out = call(
+                &mut server,
+                "session/new",
+                json!({ "cwd": dir, "agent": "build" }),
+            )
+            .await;
+            let session_id = out[0]["result"]["sessionId"].as_str().unwrap().to_string();
+            if i == 0 {
+                oldest = session_id;
+            }
+        }
+        assert_eq!(server.sessions.len(), MAX_SESSIONS);
+
+        let out = call(
+            &mut server,
+            "session/new",
+            json!({ "cwd": dir, "agent": "build" }),
+        )
+        .await;
+        assert!(out[0]["result"]["sessionId"].is_string(), "{:?}", out[0]);
+        assert_eq!(server.sessions.len(), MAX_SESSIONS);
+        assert!(!server.sessions.contains_key(&oldest));
+    }
+
+    /// A session with a prompt in flight is never evicted: the cap still
+    /// fails closed when there is nothing idle to give up.
+    #[tokio::test]
+    async fn the_session_cap_refuses_when_every_session_is_busy() {
+        let mut server = server();
+        let dir = std::env::temp_dir();
+        for _ in 0..MAX_SESSIONS {
+            let out = call(
+                &mut server,
+                "session/new",
+                json!({ "cwd": dir, "agent": "build" }),
+            )
+            .await;
+            assert!(out[0]["result"]["sessionId"].is_string(), "{:?}", out[0]);
+        }
+        let ids: Vec<String> = server.sessions.keys().cloned().collect();
+        {
+            let mut cancels = server.cancels.lock().expect("cancels");
+            for id in ids {
+                cancels.insert(id, tokio_util::sync::CancellationToken::new());
+            }
+        }
+
+        let out = call(
+            &mut server,
+            "session/new",
+            json!({ "cwd": dir, "agent": "build" }),
+        )
+        .await;
+        let message = out[0]["error"]["message"].as_str().unwrap_or_default();
+        assert!(message.contains("too many sessions"), "got {message}");
+    }
+
+    /// session/load used to insert without the cap, so a client could grow
+    /// the session map past the limit that session/new enforces.
+    #[tokio::test]
+    async fn session_load_respects_the_session_cap() {
+        let mut server = server();
+        let dir = std::env::temp_dir();
+        let project = server.db.ensure_project(&dir).expect("project");
+        let stored = server
+            .db
+            .create_session(&project, "build", "ACP session", None)
+            .expect("session");
+        for _ in 0..MAX_SESSIONS {
+            let out = call(
+                &mut server,
+                "session/new",
+                json!({ "cwd": dir, "agent": "build" }),
+            )
+            .await;
+            assert!(out[0]["result"]["sessionId"].is_string(), "{:?}", out[0]);
+        }
+        let out = call(&mut server, "session/load", json!({ "sessionId": stored })).await;
+        assert!(out[0]["result"]["sessionId"].is_string(), "{:?}", out[0]);
+        assert!(server.sessions.len() <= MAX_SESSIONS);
     }
 
     #[tokio::test]

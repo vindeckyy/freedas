@@ -28,6 +28,11 @@ a terminal whose process has ended holds nothing back, so it never blocks a
 new one, and the newest finished terminals stay readable until they are
 evicted.
 
+The server keeps at most 64 sessions. Nothing ever closes an ACP session, so
+when the limit is reached the oldest idle session - no prompt running, no
+permission parked - is forgotten instead of refusing the next request. A
+session with a prompt in flight is never evicted.
+
 A request without a `sessionID` gets a `Session::fallback` rooted at the
 server's cwd.
 
