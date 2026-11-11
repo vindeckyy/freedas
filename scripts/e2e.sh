@@ -114,6 +114,9 @@ check "rules prints" "$BIN rules | grep -q 'Freedas picks the model'"
 echo "== 12. upgrade/uninstall flags exist =="
 check "uninstall help" "$BIN uninstall --help | grep -q keep-data"
 
+echo "== 13. debug =="
+check "debug prints sandbox status" "$BIN debug | grep -qi 'sandbox'"
+
 echo
 echo "PASS=$PASS FAIL=$FAIL"
 exit $FAIL
