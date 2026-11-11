@@ -539,8 +539,9 @@ async fn list_sessions(State(s): State<AppState>, Query(q): Query<PageQuery>) ->
     let pid =
         s.db.ensure_project(&s.paths.project_root)
             .map_err(internal)?;
+    // Client-supplied limit is a cap, not a scan licence.
     let rows =
-        s.db.list_sessions(&pid, q.limit.unwrap_or(50))
+        s.db.list_sessions(&pid, q.limit.unwrap_or(50).min(500))
             .map_err(internal)?;
     let aborts = s.aborts.lock().expect("aborts");
     Ok(Json(json!(
