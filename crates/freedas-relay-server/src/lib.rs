@@ -607,7 +607,27 @@ fn hex_value(byte: u8) -> Option<u8> {
 
 pub async fn serve(host: &str, port: u16, token: &str) -> io::Result<()> {
     let listener = tokio::net::TcpListener::bind((host, port)).await?;
-    axum::serve(listener, app(token.to_owned())).await
+    axum::serve(listener, app(token.to_owned()))
+        .with_graceful_shutdown(shutdown_signal())
+        .await
+}
+
+/// Resolves on Ctrl-C or SIGTERM so the listener stops accepting and the
+/// process exits 0 under a supervisor.
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("SIGTERM");
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = term.recv() => {}
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
 }
 
 async fn health() -> Json<serde_json::Value> {
