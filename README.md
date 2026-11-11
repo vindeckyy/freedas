@@ -20,15 +20,15 @@ Freedas leads every public launch, footprint, and per-prompt benchmark —
 and sends near-minimal input tokens even with all 17 tools advertised:
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/benchmarks-launch-dark-v5.png">
-  <source media="(prefers-color-scheme: light)" srcset="docs/benchmarks-launch-light-v5.png">
-  <img alt="Freedas launch benchmarks: first in spawn time, ready-to-type, and warm launch" src="docs/benchmarks-launch-light-v5.png">
+  <source media="(prefers-color-scheme: dark)" srcset="docs/benchmarks-launch-dark-v6.png">
+  <source media="(prefers-color-scheme: light)" srcset="docs/benchmarks-launch-light-v6.png">
+  <img alt="Freedas launch benchmarks: first in spawn time, ready-to-type, and warm launch" src="docs/benchmarks-launch-light-v6.png">
 </picture>
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/benchmarks-footprint-dark-v5.png">
-  <source media="(prefers-color-scheme: light)" srcset="docs/benchmarks-footprint-light-v5.png">
-  <img alt="Freedas footprint and efficiency benchmarks: first in idle memory, disk footprint, and per-prompt overhead; third in input tokens behind deliberately reduced tool configs" src="docs/benchmarks-footprint-light-v5.png">
+  <source media="(prefers-color-scheme: dark)" srcset="docs/benchmarks-footprint-dark-v6.png">
+  <source media="(prefers-color-scheme: light)" srcset="docs/benchmarks-footprint-light-v6.png">
+  <img alt="Freedas footprint and efficiency benchmarks: first in idle memory, disk footprint, and per-prompt overhead; third in input tokens behind deliberately reduced tool configs" src="docs/benchmarks-footprint-light-v6.png">
 </picture>
 
 External numbers are published same-rig results from

@@ -34,8 +34,8 @@ def fmt(v, unit):
 # (title, unit, log, chip_override, rows[(label, value, is_fd, ghost)], note)
 LAUNCH = [
     ("Spawn: `--version` / `--help`", "ms", True,
-     (("Spawn: 6.1\u00d7 vs Claude Code \u00b7 14ms \u2192 2.3ms", "a"),
-      ("Spawn: 33\u00d7 vs Codex \u00b7 77ms \u2192 2.3ms", "b")),
+     (("Spawn: 6.1\u00d7 faster than Claude Code \u00b7 14ms\u21922.3ms", "a"),
+      ("Spawn: 33\u00d7 faster than Codex \u00b7 77ms\u21922.3ms", "b")),
      [("freedas", 2.3, True, False), ("agentty", 2.6, False, False),
       ("zot", 13, False, False), ("Claude Code", 14, False, False),
       ("jcode", 17, False, False), ("Codex CLI", 77, False, False),
@@ -44,8 +44,8 @@ LAUNCH = [
      "Median process spawn. agentty.org same-rig for its seven tools; zot/pi "
      "from graphwiz.ai (--help timing)."),
     ("Interactive: launch \u2192 ready to type", "ms", True,
-     (("Ready-to-type: 45\u00d7 vs Claude Code \u00b7 635ms \u2192 14ms", "a"),
-      ("Ready-to-type: 29\u00d7 vs Codex \u00b7 402ms \u2192 14ms", "b")),
+     (("Ready-to-type: 45\u00d7 faster than Claude Code \u00b7 635ms\u219214ms", "a"),
+      ("Ready-to-type: 29\u00d7 faster than Codex \u00b7 402ms\u219214ms", "b")),
      [("freedas", 14, True, False), ("agentty", 47, False, False),
       ("jcode", 56, False, False), ("Forcefield", 334, False, False),
       ("Codex CLI", 402, False, False), ("Claude Code", 635, False, False),
@@ -54,8 +54,8 @@ LAUNCH = [
      "agentty.org ready-to-type medians (median of 10, same machine); freedas "
      "= exec \u2192 first TUI byte; Forcefield = warm-launch p50."),
     ("Warm launch p50 (isolated HOME)", "ms", True,
-     (("Warm launch: 113\u00d7 vs Claude Code \u00b7 1.59s \u2192 14ms", "a"),
-      ("Warm launch: 5.2\u00d7 vs Codex \u00b7 73ms \u2192 14ms", "b")),
+     (("Warm launch: 113\u00d7 faster than Claude Code \u00b7 1.59s\u219214ms", "a"),
+      ("Warm launch: 5.2\u00d7 faster than Codex \u00b7 73ms\u219214ms", "b")),
      [("freedas", 14, True, False), ("Codex CLI", 73, False, False),
       ("Grok CLI", 203, False, False), ("Forcefield", 334, False, False),
       ("Claude Code", 1588, False, False),
@@ -66,8 +66,8 @@ LAUNCH = [
 
 FOOTPRINT = [
     ("Idle memory (RSS)", "mb", False,
-     (("Idle RSS: 10\u00d7 vs Claude Code \u00b7 152MB \u2192 15MB", "a"),
-      ("Idle RSS: 10\u00d7 vs Codex \u00b7 152MB \u2192 15MB", "b")),
+     (("Idle RSS: 10\u00d7 leaner than Claude Code \u00b7 152MB\u219215MB", "a"),
+      ("Idle RSS: 10\u00d7 leaner than Codex \u00b7 152MB\u219215MB", "b")),
      [("freedas", 15, True, False), ("agentty", 21, False, False),
       ("Aider", 74, False, False), ("jcode", 106, False, False),
       ("Claude Code", 152, False, False), ("Codex CLI", 152, False, False),
@@ -75,8 +75,8 @@ FOOTPRINT = [
      "RSS while waiting for input. agentty.org same-rig medians; freedas on "
      "the release build."),
     ("Disk footprint", "mb", False,
-     (("Disk: 20\u00d7 vs Claude Code \u00b7 325MB \u2192 16MB", "a"),
-      ("Disk: 33\u00d7 vs Codex \u00b7 536MB \u2192 16MB", "b")),
+     (("Disk: 20\u00d7 smaller than Claude Code \u00b7 325MB\u219216MB", "a"),
+      ("Disk: 33\u00d7 smaller than Codex \u00b7 536MB\u219216MB", "b")),
      [("freedas", 16, True, False), ("agentty", 23, False, False),
       ("jcode", 163, False, False), ("Gemini CLI", 197, False, False),
       ("Claude Code", 325, False, False), ("opencode", 409, False, False),
@@ -84,8 +84,8 @@ FOOTPRINT = [
      "Binary + required runtime. agentty.org values; freedas is one stripped "
      "binary, no bundled runtime."),
     ("Per-prompt harness tax", "ms", True,
-     (("Per-prompt: 130\u00d7 vs Claude Code \u00b7 1690ms \u2192 13ms", "a"),
-      ("Per-prompt: 6\u00d7 vs old freedas \u00b7 80ms \u2192 13ms", "c")),
+     (("Per-prompt: 130\u00d7 faster than Claude Code \u00b7 1690ms\u219213ms", "a"),
+      ("Per-prompt: 6\u00d7 faster than old freedas \u00b7 80ms\u219213ms", "c")),
      [("freedas", 13, True, False), ("freedas (pre-lazy)", 80, False, False),
       ("Claude Code overhead", 1690, False, False),
       ("median model response", 3014, False, True)],
@@ -93,8 +93,8 @@ FOOTPRINT = [
      "TTFT-study median; freedas: full end-to-end run incl. lazy "
      "snapshot-skip."),
     ("Input tokens per trivial prompt", "tok", False,
-     (("Input tokens: 12.9\u00d7 vs Claude Code \u00b7 17.4k \u2192 1.4k", "a"),
-      ("Input tokens: 14.5\u00d7 vs Codex \u00b7 19.6k \u2192 1.4k", "b")),
+     (("Input tokens: 12.9\u00d7 leaner than Claude Code \u00b7 17.4k\u21921.4k", "a"),
+      ("Input tokens: 14.5\u00d7 leaner than Codex \u00b7 19.6k\u21921.4k", "b")),
      [("Pi \u00b7 no tools", 466, False, True),
       ("Claude Code --bare", 1265, False, True),
       ("freedas \u00b7 17 tools", 1350, True, False),
@@ -168,7 +168,7 @@ def render_chart(title, unit, log, chip_override, rows, note, C, y0):
             f'font-weight="{lw}">{esc(fmt(val, unit))}</text>')
         if is_fd:
             for i, (t, ck) in enumerate(chips):
-                pw = len(t) * 5.6 + 16
+                pw = len(t) * 5.4 + 16
                 px = W - 30 - pw
                 py = ry + 4 + i * 16
                 out.append(
@@ -232,17 +232,17 @@ for suffix, C in (("dark", DARK), ("light", LIGHT)):
     figure(C, LAUNCH,
            "freedas \u2014 launch benchmarks",
            "vs every published same-rig number \u00b7 lower is better",
-           str(DOCS / f"benchmarks-launch-{suffix}-v5.svg"))
+           str(DOCS / f"benchmarks-launch-{suffix}-v6.svg"))
     figure(C, FOOTPRINT,
            "freedas \u2014 footprint & efficiency benchmarks",
            "vs every published same-rig number \u00b7 lower is better",
-           str(DOCS / f"benchmarks-footprint-{suffix}-v5.svg"))
+           str(DOCS / f"benchmarks-footprint-{suffix}-v6.svg"))
 
 # Rasterize to 2x PNGs for GitHub (camo handles PNGs reliably).
 for stem in ("benchmarks-launch", "benchmarks-footprint"):
     for suffix in ("dark", "light"):
-        svg_p = DOCS / f"{stem}-{suffix}-v5.svg"
-        png_p = DOCS / f"{stem}-{suffix}-v5.png"
+        svg_p = DOCS / f"{stem}-{suffix}-v6.svg"
+        png_p = DOCS / f"{stem}-{suffix}-v6.png"
         subprocess.run(
             ["rsvg-convert", "-w", "1696", str(svg_p), "-o", str(png_p)],
             check=True)
