@@ -39,18 +39,21 @@ When active, `bash` runs inside `sandbox-exec` (macOS) or `bubblewrap` (Linux): 
 
 ## Server and remote surfaces
 
-- `freedas serve` binds loopback; non-loopback requires `--allow-remote` plus `FREEDAS_SERVER_TOKEN` or `FREEDAS_SERVER_PASSWORD`; non-loopback `Host` headers are rejected on a loopback bind.
+- `freedas serve` binds loopback; non-loopback requires `--allow-remote` plus `FREEDAS_SERVER_TOKEN` or `FREEDAS_SERVER_PASSWORD`; non-loopback `Host` headers (and missing `Host`, unless `FREEDAS_SERVER_ALLOW_MISSING_HOST=1`) are rejected on a loopback bind.
+- The default loopback server is unauthenticated by design: any local process can drive the agent. Set `FREEDAS_SERVER_TOKEN` (or `FREEDAS_SERVER_PASSWORD`) to require credentials on loopback too. Non-loopback binds are plain HTTP — terminate TLS in a proxy or use an SSH tunnel.
 - `freedas-relay-server` refuses a non-loopback bind without `--token`; the relay is outbound-only.
 - `freedas-control`, `freedas-gateway`, `freedas-review`, `freedas-relay-server`, and `freedas-sandbox-runner` all run on your own infrastructure; provider credentials never leave them to the CLI.
 - GitHub webhooks verify `X-Hub-Signature-256` and record delivery ids against replay.
-- Tokens: CLI login tokens are hashed (SHA-256) and revocable; sandbox and GitHub tokens are short-lived and scoped.
+- Tokens: CLI login tokens are hashed (SHA-256), revocable, and expire after 30 days; sandbox and GitHub tokens are short-lived and scoped. A user token's bound workspace is re-checked against live membership on every request.
+- The relay server accepts per-machine credentials (`RELAY_MACHINE_TOKENS`) and scope allowlists (`RELAY_MACHINE_SCOPES`), stamps server-side sequence numbers, drops replayed events, and never fans machine events out to peer machines; dashboard SSE uses one-time tickets (`/events/ticket`).
 
 ## Plugins and MCP
 
 - WASM plugins have no WASI or host imports.
 - JS plugins run in QuickJS under memory and time caps with only the `freedas` global.
 - Process plugins are trusted executables; they run only after `FREEDAS_PLUGIN_TRUST=1` records the file hash, and again when the hash changes. Environment is cleared except a small allowlist.
-- MCP servers get the same permission rules as built-in tools (`<server>_<tool>` actions), a 5 MiB/timeout budget, and OAuth tokens stored like provider credentials.
+- MCP servers get the same permission rules as built-in tools (`<server>_<tool>` actions), a 5 MiB/timeout budget, and OAuth tokens stored like provider credentials. Remote URLs are checked against loopback/private/link-local/metadata hosts, and project-layer `mcp` entries only connect in a trusted project.
+- Project-supplied agents, skills, slash commands, plugins, and config execute only when the project is trusted (`trust_project_code` or `FREEDAS_TRUST_PROJECT_CODE=1`); untrusted layers are skipped and privileged keys are stripped.
 
 ## Audit and retention
 

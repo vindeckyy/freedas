@@ -3,6 +3,9 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<!-- Defense in depth on top of the response headers the server sets. -->
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; connect-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'self'; frame-ancestors 'none'">
+<meta name="referrer" content="no-referrer">
 <title>Freedas: session workspace</title>
 <style>
   :root {
@@ -661,10 +664,29 @@ async function api(path, options = {}) {
   return res.json();
 }
 
+// Only http(s) and same-origin fragment targets become clickable hrefs;
+// anything else (javascript:, data:, vbscript:) renders as inert text.
+function safeHref(url) {
+  if (typeof url !== "string") return null;
+  if (url.startsWith("#")) return url;
+  try {
+    const u = new URL(url, window.location.href);
+    return u.protocol === "https:" || u.protocol === "http:" ? url : null;
+  } catch {
+    return null;
+  }
+}
+
 function el(tag, attrs = {}, ...kids) {
   const node = document.createElement(tag);
   for (const [key, value] of Object.entries(attrs)) {
     if (value == null || value === false) continue;
+    if (key === "href" && tag === "a") {
+      const safe = safeHref(value);
+      if (safe == null) continue; // drop the attribute; link text still shows
+      node.setAttribute("href", safe);
+      continue;
+    }
     if (key === "class") node.className = value;
     else if (key === "text") node.textContent = value;
     else if (key === "value" || key === "checked" || key === "disabled") node[key] = value;
@@ -727,7 +749,7 @@ function pageFailure(root, title, err, retry) {
 // On the local server the same paths answer 404, so the page says so instead
 // of pretending the service is down.
 function tokenBar(root) {
-  const input = el("input", { type: "password", id: "control-token", placeholder: "Paste a freedas-control token (freedas tokens create)", value: controlToken() });
+  const input = el("input", { type: "password", id: "control-token", placeholder: controlToken() ? "Token stored — paste a new one to replace" : "Paste a freedas-control token (freedas tokens create)" });
   const status = el("p", { class: "muted", text: controlToken() ? "Token stored in this browser." : "No token stored." });
   root.append(el("div", { class: "actions" },
     el("label", { for: "control-token", class: "muted", text: "Control token" }), input,
@@ -1380,8 +1402,11 @@ function replyPermission(request, response) {
 function showNextPermission() {
   if (permActive || permQueue.length === 0) return;
   permActive = permQueue.shift();
+  // Identity + scope, not just the bare rule: blind approvals are the bug.
   $("perm-body").textContent =
-    permActive.action + " — " + permActive.resource;
+    permActive.action + " — " + permActive.resource +
+    "\n\nsession " + (permActive.sessionID || "?") +
+    " · request " + (permActive.permissionID || "?");
   $("perm-error").hidden = true;
   $("perm-dialog").showModal();
 }
@@ -2565,6 +2590,10 @@ PAGES["/relay-session"] = async (root, id) => {
   const run = relayRun;
   (async () => {
     const token = controlToken();
+    // EventSource cannot set Authorization headers, so the token rides the
+    // query string; the page ships Referrer-Policy: no-referrer and
+    // Cache-Control: no-store to keep it out of referers and disk caches.
+    // Server-side access logs must redact the `token` parameter.
     // Only freedas-relay-server serves /events; say so instead of reconnect-looping.
     try {
       const probe = await fetch(token ? "/events?token=" + encodeURIComponent(token) : "/events", { headers: { accept: "text/event-stream" } });

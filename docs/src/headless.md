@@ -43,9 +43,11 @@ result's `blocked` array. `--auto` approves asks; explicit `deny` rules and
 the catastrophic deny list still block. `--manual` has no one to ask either,
 so headless it behaves like the default.
 
-The local OS sandbox is on for headless runs by default when a backend is
-available (`sandbox-exec` on macOS, `bwrap` on Linux);
-`FREEDAS_EXPERIMENTAL_SANDBOX=false` or `sandbox.mode = "off"` opts out.
+The local OS sandbox is required for headless runs: `auto` mode sandboxes
+headless by default, and with no backend available a headless `bash` call
+fails instead of falling back to unsandboxed execution — there is nobody to
+approve the risk. Install `sandbox-exec`/`bwrap`, set `sandbox.mode = "off"`,
+or `FREEDAS_EXPERIMENTAL_SANDBOX=false` to run bare.
 
 ## JSON events
 

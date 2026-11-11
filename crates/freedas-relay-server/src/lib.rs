@@ -38,6 +38,10 @@ const MAX_HISTORY_PER_SESSION: usize = 1000;
 /// Bounds for client-supplied session ids; anything else is ignored.
 const MAX_SESSIONS_PER_MACHINE: usize = 512;
 const MAX_SESSION_ID_LEN: usize = 128;
+/// Sessions tracked in the replay-dedup ring.
+const MAX_SESSIONS_TRACKED: usize = 4096;
+/// One-time SSE tickets live this long before being refused.
+const TICKET_TTL: std::time::Duration = std::time::Duration::from_secs(30);
 /// How long `forward` waits for a slow machine before reporting 504.
 const FORWARD_TIMEOUT: Duration = Duration::from_millis(500);
 
@@ -69,6 +73,17 @@ type SessionHistory = HashMap<String, VecDeque<(u64, RelayFrame)>>;
 #[derive(Clone)]
 struct RelayState {
     token: String,
+    /// Per-machine credentials/scopes configured by the operator
+    /// (`RELAY_MACHINE_TOKENS` / `RELAY_MACHINE_SCOPES` as
+    /// `id=value,id2=value2`). When present, a hello must match its entry —
+    /// self-asserted machine_id and scope stop being enough.
+    machine_tokens: Arc<HashMap<String, String>>,
+    machine_scopes: Arc<HashMap<String, String>>,
+    /// One-time SSE tickets minted by `POST /events/ticket`; consumed on use
+    /// and expired after `TICKET_TTL`, so the bearer stays out of URLs.
+    tickets: Arc<Mutex<HashMap<String, Instant>>>,
+    /// Recent event hashes per session for exact-replay drops.
+    seen: Arc<Mutex<HashMap<String, VecDeque<u64>>>>,
     events: broadcast::Sender<RelayFrame>,
     machines: Arc<Mutex<HashMap<String, Machine>>>,
     next_conn: Arc<AtomicU64>,
@@ -82,8 +97,35 @@ struct RelayState {
     seqs: Arc<Mutex<HashMap<String, u64>>>,
 }
 
+impl RelayState {
+    /// Mint a one-time ticket for `GET /events?ticket=`; the SSE handshake
+    /// consumes it so tickets cannot be replayed.
+    fn mint_ticket(&self) -> String {
+        let ticket = ulid::Ulid::new().to_string();
+        let mut tickets = self.tickets.lock().expect("tickets lock poisoned");
+        tickets.retain(|_, at| at.elapsed() < TICKET_TTL);
+        tickets.insert(ticket.clone(), Instant::now());
+        ticket
+    }
+
+    /// Consume a ticket once; expired or unknown tickets are refused.
+    fn take_ticket(&self, ticket: &str) -> bool {
+        let mut tickets = self.tickets.lock().expect("tickets lock poisoned");
+        tickets.remove(ticket).is_some_and(|at| at.elapsed() < TICKET_TTL)
+    }
+}
+
 /// Client-supplied ids are untrusted: ignore empty, overlong, or odd ids so
 /// one machine cannot grow server memory with junk keys.
+/// Cheap payload fingerprint for replay dedup — std-only, no secrets, the
+/// map key never leaves the server.
+fn fingerprint(event: &serde_json::Value) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    event.to_string().hash(&mut hasher);
+    hasher.finish()
+}
+
 fn valid_session_id(id: &str) -> bool {
     if id.is_empty() || id.len() > MAX_SESSION_ID_LEN {
         return false;
@@ -123,6 +165,14 @@ impl RelayState {
         }
         let conn = self.next_conn.fetch_add(1, Ordering::Relaxed) + 1;
         let previous = machines.remove(machine_id);
+        if let Some(prev) = &previous {
+            // A live socket never reaches here, but a stale-TTL takeover is
+            // exactly how a forged hello impersonates a machine: make noise.
+            eprintln!(
+                "relay: machine {machine_id} re-registered (previous scope {}, new {scope})",
+                prev.scope
+            );
+        }
         let (sessions, shared, usage) = previous
             .map(|machine| (machine.sessions, machine.shared, machine.usage))
             .unwrap_or_default();
@@ -152,8 +202,28 @@ impl RelayState {
         }
     }
 
+    /// The live machine that already owns a session, if any. "Owned" means
+    /// recorded or shared while the machine is fresh — a second machine
+    /// cannot squat a victim's session id.
+    fn session_owner(&self, session_id: &str, exclude: &str) -> Option<String> {
+        let now = Instant::now();
+        self.machines()
+            .iter()
+            .find(|(id, machine)| {
+                id.as_str() != exclude
+                    && now.duration_since(machine.last_seen) < PRESENCE_TTL
+                    && (machine.sessions.contains(session_id)
+                        || machine.shared.contains(session_id))
+            })
+            .map(|(id, _)| id.clone())
+    }
+
     fn record_event(&self, machine_id: &str, session_id: &str) {
         if !valid_session_id(session_id) {
+            return;
+        }
+        if let Some(owner) = self.session_owner(session_id, machine_id) {
+            eprintln!("relay: {machine_id} tried to squat session owned by {owner}");
             return;
         }
         if let Some(machine) = self.machines().get_mut(machine_id) {
@@ -226,17 +296,19 @@ impl RelayState {
     /// Append a frame to the per-session ring for `since_seq` resume. The
     /// client `seq` is ignored: the frame is stored under the server `seq`
     /// so duplicate, out-of-order, or huge client seqs never drop history.
-    fn push_history(&self, frame: &RelayFrame) {
+    /// Returns the server-assigned seq for stamping on the live broadcast.
+    fn push_history(&self, frame: &RelayFrame) -> Option<u64> {
         let RelayFrame::Event {
             session_id, event, ..
         } = frame
         else {
-            return;
+            return None;
         };
         if !valid_session_id(session_id) {
-            return;
+            return None;
         }
         let seq = self.next_seq(session_id);
+        self.record_seen(session_id, &fingerprint(event));
         let stored = RelayFrame::Event {
             session_id: session_id.clone(),
             seq,
@@ -247,6 +319,34 @@ impl RelayState {
         entry.push_back((seq, stored));
         while entry.len() > MAX_HISTORY_PER_SESSION {
             entry.pop_front();
+        }
+        Some(seq)
+    }
+
+    /// Whether this exact event payload was already recorded for the
+    /// session: replayed frames append history and rebroadcast as "new"
+    /// otherwise. A short ring of payload fingerprints is enough.
+    fn is_replay(&self, session_id: &str, hash: u64) -> bool {
+        self.seen
+            .lock()
+            .expect("seen lock poisoned")
+            .get(session_id)
+            .is_some_and(|ring| ring.contains(&hash))
+    }
+
+    fn record_seen(&self, session_id: &str, hash: &u64) {
+        let mut seen = self.seen.lock().expect("seen lock poisoned");
+        let ring = seen.entry(session_id.to_owned()).or_default();
+        ring.push_back(*hash);
+        while ring.len() > 64 {
+            ring.pop_front();
+        }
+        while seen.len() > MAX_SESSIONS_TRACKED {
+            if let Some(key) = seen.keys().next().cloned() {
+                seen.remove(&key);
+            } else {
+                break;
+            }
         }
     }
 
@@ -268,6 +368,10 @@ impl RelayState {
 
     fn set_shared(&self, machine_id: &str, session_id: &str, shared: bool) {
         if !valid_session_id(session_id) {
+            return;
+        }
+        if shared && self.session_owner(session_id, machine_id).is_some() {
+            eprintln!("relay: {machine_id} tried to share an owned session {session_id}");
             return;
         }
         if let Some(machine) = self.machines().get_mut(machine_id) {
@@ -337,20 +441,6 @@ impl RelayState {
                 }
         })
     }
-
-    /// A session-scoped machine only receives frames for sessions it shared.
-    fn forwards(&self, machine_id: &str, frame: &RelayFrame) -> bool {
-        let session_id = match frame {
-            RelayFrame::Event { session_id, .. } => session_id,
-            RelayFrame::Permission { session_id, .. } => session_id,
-            _ => return true,
-        };
-        match self.machines().get(machine_id) {
-            Some(machine) if machine.scope == "session" => machine.shared.contains(session_id),
-            Some(_) => true,
-            None => false,
-        }
-    }
 }
 
 /// Build the relay router. An empty `token` falls back to `RELAY_TOKEN`; if
@@ -367,6 +457,10 @@ pub fn app(token: String) -> Router {
     let (events, _) = broadcast::channel(1000);
     let state = RelayState {
         token,
+        machine_tokens: Arc::new(env_id_map("RELAY_MACHINE_TOKENS")),
+        machine_scopes: Arc::new(env_id_map("RELAY_MACHINE_SCOPES")),
+        tickets: Arc::new(Mutex::new(HashMap::new())),
+        seen: Arc::new(Mutex::new(HashMap::new())),
         events,
         machines: Arc::new(Mutex::new(HashMap::new())),
         next_conn: Arc::new(AtomicU64::new(0)),
@@ -379,6 +473,7 @@ pub fn app(token: String) -> Router {
 fn build(state: RelayState) -> Router {
     let dashboard = Router::new()
         .route("/events", get(events))
+        .route("/events/ticket", post(events_ticket))
         .route("/machines", get(list_machines))
         .route("/sessions", get(list_sessions))
         .route("/sessions/{id}/summary", get(session_summary))
@@ -391,6 +486,20 @@ fn build(state: RelayState) -> Router {
         .route("/ws", get(ws_upgrade))
         .merge(dashboard)
         .with_state(state)
+}
+
+/// Parse `id=value,id2=value2` env maps; empty entries and `=`s in values
+/// are dropped so a typo fails closed rather than silently widening.
+fn env_id_map(name: &str) -> HashMap<String, String> {
+    std::env::var(name)
+        .unwrap_or_default()
+        .split(',')
+        .filter_map(|pair| {
+            let (id, value) = pair.split_once('=')?;
+            let (id, value) = (id.trim(), value.trim());
+            (!id.is_empty() && !value.is_empty()).then(|| (id.to_owned(), value.to_owned()))
+        })
+        .collect()
 }
 
 /// Bearer-token gate for the dashboard API. Only `GET /events` accepts
@@ -418,19 +527,44 @@ async fn require_token(State(state): State<RelayState>, request: Request, next: 
                 .map(percent_decode)
         })
         .flatten();
-    let allowed = header.is_some_and(|presented| token_matches(&state.token, presented))
+    // `/events` also accepts a one-time `?ticket=` minted by
+    // `POST /events/ticket`; consumed on use and short-lived, so no bearer
+    // ever has to sit in a URL.
+    let ticket_ok = is_events
+        && request
+            .uri()
+            .query()
+            .and_then(|query| {
+                query
+                    .split('&')
+                    .find_map(|pair| pair.strip_prefix("ticket="))
+            })
+            .is_some_and(|ticket| state.take_ticket(ticket));
+    let allowed = ticket_ok
+        || header.is_some_and(|presented| token_matches(&state.token, presented))
         || query
             .as_deref()
             .is_some_and(|presented| token_matches(&state.token, presented));
     if allowed {
         next.run(request).await
     } else {
+        auth_failure_backoff().await;
         (
             StatusCode::UNAUTHORIZED,
             Json(serde_json::json!({ "error": "unauthorized" })),
         )
             .into_response()
     }
+}
+
+static AUTH_FAILS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// Bounded brute-force defense on hello/bearer guesses: exponential delay
+/// (100ms → 3.2s cap) plus a log line that never echoes the credential.
+async fn auth_failure_backoff() {
+    let n = AUTH_FAILS.fetch_add(1, Ordering::Relaxed).min(5);
+    eprintln!("relay: auth failure #{}", n + 1);
+    tokio::time::sleep(std::time::Duration::from_millis(100u64 << n)).await;
 }
 
 /// Minimal percent-decoding for the `EventSource` query token.
@@ -476,6 +610,12 @@ pub async fn serve(host: &str, port: u16, token: &str) -> io::Result<()> {
 
 async fn health() -> Json<serde_json::Value> {
     Json(serde_json::json!({ "ok": true }))
+}
+
+/// `POST /events/ticket`: mint a short-lived, single-use SSE ticket so
+/// `EventSource` clients need not place the bearer in `?token=`.
+async fn events_ticket(State(state): State<RelayState>) -> Json<serde_json::Value> {
+    Json(serde_json::json!({ "ticket": state.mint_ticket() }))
 }
 
 /// `GET /events`: server-sent stream of every session event machines report.
@@ -825,6 +965,7 @@ async fn handle(mut socket: WebSocket, state: RelayState) {
         _ => None,
     };
     let Some((machine_id, scope)) = hello else {
+        auth_failure_backoff().await;
         let _ = socket
             .send(Message::Text(
                 RelayFrame::Error {
@@ -870,17 +1011,10 @@ async fn handle(mut socket: WebSocket, state: RelayState) {
                     break;
                 }
             }
-            event = events.recv() => match event {
-                Ok(frame) => {
-                    if state.forwards(&machine_id, &frame)
-                        && !send_frame(&mut socket, frame).await
-                    {
-                        break;
-                    }
-                }
-                Err(broadcast::error::RecvError::Lagged(_)) => continue,
-                Err(broadcast::error::RecvError::Closed) => break,
-            },
+            // Machines are publishers, not subscribers: the broadcast is for
+            // the dashboard only. Forwarding it to peers leaked every other
+            // machine's session events and permission prompts.
+            _ = events.recv() => {}
         }
     }
     state.forget(&machine_id, conn);
@@ -901,20 +1035,35 @@ async fn send_frame(socket: &mut WebSocket, frame: RelayFrame) -> bool {
 }
 
 fn hello_machine(state: &RelayState, text: &str) -> Option<(String, String)> {
-    match RelayFrame::from_json(text) {
-        Some(RelayFrame::Hello {
-            machine_id,
-            scope,
-            token,
-            ..
-        }) if !machine_id.is_empty()
-            && (scope == "machine" || scope == "session")
-            && token_matches(&state.token, &token) =>
-        {
-            Some((machine_id, scope))
-        }
-        _ => None,
+    let Some(RelayFrame::Hello {
+        machine_id,
+        scope,
+        token,
+        ..
+    }) = RelayFrame::from_json(text)
+    else {
+        return None;
+    };
+    if machine_id.is_empty() || (scope != "machine" && scope != "session") {
+        return None;
     }
+    // Per-machine credential when the operator configured one; the shared
+    // token alone is no longer enough to impersonate that id.
+    let expected = state
+        .machine_tokens
+        .get(&machine_id)
+        .unwrap_or(&state.token);
+    if !token_matches(expected, &token) {
+        return None;
+    }
+    // Scope must match the server-side allowlist when one exists — the
+    // client no longer picks "machine" by assertion.
+    if !state.machine_scopes.is_empty()
+        && state.machine_scopes.get(&machine_id).map(String::as_str) != Some(scope.as_str())
+    {
+        return None;
+    }
+    Some((machine_id, scope))
 }
 
 async fn process(state: &RelayState, machine_id: &str, text: &str, socket: &mut WebSocket) {
@@ -932,19 +1081,30 @@ async fn process(state: &RelayState, machine_id: &str, text: &str, socket: &mut 
         return;
     };
     match frame {
-        frame @ RelayFrame::Event { .. } => {
-            // The server owns history seqs: `push_history` stores the payload
-            // under the next server `seq`, ignoring the client `seq`, while
-            // the live broadcast below keeps the client frame as today.
-            if let RelayFrame::Event {
-                session_id, event, ..
-            } = &frame
-            {
-                state.record_event(machine_id, session_id);
-                state.record_usage(machine_id, session_id, event);
-                state.push_history(&frame);
+        RelayFrame::Event {
+            session_id, event, ..
+        } => {
+            // Replay dedup first: an exact copy must not append history or
+            // rebroadcast as "new". Server seq is stamped on the live frame
+            // too so dashboards never see client-chosen ordering.
+            let hash = fingerprint(&event);
+            if state.is_replay(&session_id, hash) {
+                return;
             }
-            let _ = state.events.send(frame);
+            state.record_event(machine_id, &session_id);
+            state.record_usage(machine_id, &session_id, &event);
+            let Some(seq) = state.push_history(&RelayFrame::Event {
+                session_id: session_id.clone(),
+                seq: 0,
+                event: event.clone(),
+            }) else {
+                return;
+            };
+            let _ = state.events.send(RelayFrame::Event {
+                session_id,
+                seq,
+                event,
+            });
         }
         RelayFrame::Permission { ref session_id, .. } => {
             // Bind the prompt to its session: only the machine exposing the
@@ -1033,6 +1193,10 @@ mod tests {
         let (events, _) = broadcast::channel(8);
         let state = RelayState {
             token: "secret".to_owned(),
+            machine_tokens: Arc::new(HashMap::new()),
+            machine_scopes: Arc::new(HashMap::new()),
+            tickets: Arc::new(Mutex::new(HashMap::new())),
+            seen: Arc::new(Mutex::new(HashMap::new())),
             events,
             machines: Arc::new(Mutex::new(HashMap::new())),
             next_conn: Arc::new(AtomicU64::new(0)),
@@ -1106,6 +1270,10 @@ mod tests {
         let (events, _) = broadcast::channel(8);
         let state = RelayState {
             token: "secret".to_owned(),
+            machine_tokens: Arc::new(HashMap::new()),
+            machine_scopes: Arc::new(HashMap::new()),
+            tickets: Arc::new(Mutex::new(HashMap::new())),
+            seen: Arc::new(Mutex::new(HashMap::new())),
             events,
             machines: Arc::new(Mutex::new(HashMap::new())),
             next_conn: Arc::new(AtomicU64::new(0)),
@@ -1220,24 +1388,19 @@ mod tests {
             seq: 7,
             event: serde_json::json!({ "type": "message.part.updated" }),
         };
-        let mut received = None;
-        // Retry until b's subscription is live; delivery starts at subscribe.
-        for _ in 0..50 {
-            a.send(WsMessage::Text(event.to_json().into()))
-                .await
-                .unwrap();
-            match timeout(Duration::from_millis(100), b.next()).await {
-                Ok(Some(Ok(WsMessage::Text(text)))) => {
-                    received = RelayFrame::from_json(text.as_str());
-                    break;
-                }
-                Ok(Some(Ok(_))) => continue,
-                Ok(Some(Err(err))) => panic!("receiver failed: {err}"),
-                Ok(None) => panic!("receiver closed"),
-                Err(_) => continue,
-            }
-        }
-        assert_eq!(received, Some(event));
+        // Machines are publishers, not subscribers: machine-origin frames
+        // must never reach a peer socket (cross-session leak).
+        a.send(WsMessage::Text(event.to_json().into()))
+            .await
+            .unwrap();
+        let leaked = match timeout(Duration::from_millis(300), b.next()).await {
+            Ok(Some(Ok(WsMessage::Text(text)))) => RelayFrame::from_json(text.as_str()),
+            _ => None,
+        };
+        assert!(
+            !matches!(leaked, Some(RelayFrame::Event { .. })),
+            "peer received machine event: {leaked:?}"
+        );
     }
 
     #[tokio::test]
@@ -1416,6 +1579,10 @@ mod tests {
         let (events, _) = broadcast::channel(8);
         let state = RelayState {
             token: "secret".to_owned(),
+            machine_tokens: Arc::new(HashMap::new()),
+            machine_scopes: Arc::new(HashMap::new()),
+            tickets: Arc::new(Mutex::new(HashMap::new())),
+            seen: Arc::new(Mutex::new(HashMap::new())),
             events,
             machines: Arc::new(Mutex::new(HashMap::new())),
             next_conn: Arc::new(AtomicU64::new(0)),
@@ -1463,6 +1630,10 @@ mod tests {
         let (events, _) = broadcast::channel(8);
         let state = RelayState {
             token: "secret".to_owned(),
+            machine_tokens: Arc::new(HashMap::new()),
+            machine_scopes: Arc::new(HashMap::new()),
+            tickets: Arc::new(Mutex::new(HashMap::new())),
+            seen: Arc::new(Mutex::new(HashMap::new())),
             events,
             machines: Arc::new(Mutex::new(HashMap::new())),
             next_conn: Arc::new(AtomicU64::new(0)),

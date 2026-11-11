@@ -33,8 +33,8 @@ head_sha)`: a `synchronize` event for an unchanged head does not double-bill.
 `freedas-review` leases `queued` rows with `UPDATE ... SET status='running'
 ... RETURNING` (one per `--concurrency`, default 4), then:
 
-1. Mint a repository-scoped installation token for the App (`--github-app-id`, `--github-private-key-path`).
-2. Fetch the PR diff (`gh` when available, else the GitHub API base pinned by `--github-api-base`, default `https://api.github.com`).
+1. Mint a repository-scoped installation token for the App (`--github-app-id`, `--github-private-key-path`), requesting only `contents:read`, `pull_requests:write`, and `checks:write`.
+2. Fetch the PR diff at the queued `head_sha` — validated as a 40- or 64-hex object id, so a malformed row fails closed — using the configured API base (`--github-api-base` / `FREEDAS_GITHUB_API_BASE`, default `https://api.github.com`) for both the pull and compare calls. When the pinned diff cannot be fetched the review fails (retryable) rather than silently reviewing the floating head.
 3. Run the review agent with the policy's custom rules, context files, and linked repositories.
 4. Post the review (inline comments plus summary), a `freedas/review` check run, and an optional reviewer request or auto-approval when thresholds pass.
 5. Mark `completed`/`failed`/`skipped` with findings, confidence, risk, and cost; retry up to the worker's bound.
@@ -64,7 +64,11 @@ the diff and transcript are never stored.
 Strictness: `low` reports everything including nits; `medium` drops nits;
 `high` only posts findings with `confidence >= 3` and severity `high` or
 `blocker`. `status_check`/`auto_approve` gate the check-run conclusion and
-the `APPROVE` review on minimum confidence and maximum risk.
+the `APPROVE` review on minimum confidence and maximum risk. Auto-approval
+requires *both* thresholds to be set explicitly — a partial policy never
+approves — and never fires while a `blocker` or `high` finding remains.
+Finding titles, bodies, suggestions, and the summary pass through the
+redactor before they are posted or stored.
 
 ## Running the worker
 

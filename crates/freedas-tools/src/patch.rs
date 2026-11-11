@@ -3,14 +3,21 @@
 //! Both resolve every target path through `resolve_path`/`check_perm` first,
 //! then delegate the actual application to the platform `patch` binary so
 //! malformed hunks are rejected by a battle-tested parser instead of ours.
-//! Application is all-or-nothing: a failed dry-run leaves files untouched.
+//! A failed dry-run leaves files untouched.
+//!
+//! Application is NOT atomic across files: `patch` applies file-by-file, and
+//! a mid-run failure (or a tree change during the dry-run→apply window) can
+//! leave a partial result. Containment is re-verified post-apply and every
+//! existing target is hash-checked before and after, but there is no
+//! rollback — treat `patch`/`apply_patch` output as best-effort and re-check
+//! the tree on failure.
 
 use async_trait::async_trait;
 use freedas_core::{FreedasError, Result};
 use serde_json::{Value, json};
 
 use crate::{Tool, ToolContext, ToolOutput, check_perm_with_preview, resolve_path_as};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// `patch`: apply a unified diff. Input: `{diff}` (required) or `{path, diff}`
 /// to pin a single file. `-p1` strips `a/`/`b/` prefixes; `-d` scopes to the
@@ -66,12 +73,40 @@ impl Tool for PatchTool {
             }
         }
         let preview = crate::preview_cap(diff);
+        // Resolve once and hash each existing target: the stale-read guard
+        // write/edit enforce applies here too — a file changed since the last
+        // `read` fails instead of being silently clobbered.
+        let mut target_hashes: Vec<(PathBuf, String)> = Vec::new();
         for t in &targets {
-            // resolve_path rejects traversal and `.git` writes.
-            let _ = resolve_path_as(ctx, t, "edit")?;
+            let abs = resolve_path_as(ctx, t, "edit")?;
             check_perm_with_preview(ctx, "edit", Some(t), Some(&preview))?;
+            if let Ok(bytes) = tokio::fs::read(&abs).await {
+                let h = crate::hash_bytes(&bytes);
+                if crate::is_stale(ctx, &abs, &h) {
+                    return Err(FreedasError::StaleRead(format!("{t} changed on disk")));
+                }
+                target_hashes.push((abs, h));
+            }
+        }
+        // Re-compare right before the real `patch` run: drift between the
+        // permission check and the spawn is a lost-update, not a patch
+        // conflict the binary can see.
+        for (abs, h) in &target_hashes {
+            if let Ok(bytes) = tokio::fs::read(abs).await {
+                let now = crate::hash_bytes(&bytes);
+                if now != *h {
+                    return Err(FreedasError::StaleRead(
+                        "patch target changed before apply".into(),
+                    ));
+                }
+            }
         }
         let out = apply_via_patch_bin(ctx, diff, pinned).await?;
+        for (abs, _) in &target_hashes {
+            if let Ok(bytes) = tokio::fs::read(abs).await {
+                crate::record_hash(ctx, abs, crate::hash_bytes(&bytes));
+            }
+        }
         // TOCTOU: a symlink swap during the external `patch` run could redirect
         // writes outside the project; re-canonicalize each target post-apply and
         // re-verify containment.
@@ -116,8 +151,11 @@ impl Tool for ApplyPatchTool {
         if ops.is_empty() {
             return Err(FreedasError::Tool("patch has no file operations".into()));
         }
-        let mut delete_paths = Vec::new();
+        let mut delete_paths: Vec<(String, PathBuf)> = Vec::new();
         let preview = crate::preview_cap(text);
+        // Stale-read parity with write/edit: hash each existing target at
+        // resolve time and fail on drift since the last `read`.
+        let mut target_hashes: Vec<(PathBuf, String)> = Vec::new();
         for op in &ops {
             let path = op.path();
             if std::path::Path::new(path).is_absolute() {
@@ -127,22 +165,37 @@ impl Tool for ApplyPatchTool {
             }
             let abs = resolve_path_as(ctx, path, "edit")?;
             check_perm_with_preview(ctx, "edit", Some(path), Some(&preview))?;
+            if let Ok(bytes) = tokio::fs::read(&abs).await {
+                let h = crate::hash_bytes(&bytes);
+                if crate::is_stale(ctx, &abs, &h) {
+                    return Err(FreedasError::StaleRead(format!("{path} changed on disk")));
+                }
+                target_hashes.push((abs.clone(), h));
+            }
             if matches!(op, CodexOp::Delete { .. }) {
-                delete_paths.push(abs);
+                delete_paths.push((path.to_string(), abs));
             }
         }
         // Validate deletes before touching anything: a missing target must not
         // surface after the edits already landed.
-        for path in &delete_paths {
-            let exists = tokio::fs::metadata(path)
+        for (path, abs) in &delete_paths {
+            let exists = tokio::fs::metadata(abs)
                 .await
                 .map(|m| m.is_file())
                 .unwrap_or(false);
             if !exists {
-                return Err(FreedasError::Tool(format!(
-                    "delete target missing: {}",
-                    path.display()
-                )));
+                return Err(FreedasError::Tool(format!("delete target missing: {path}")));
+            }
+        }
+        // Drift between permission checks and the real `patch` spawn is a
+        // lost-update the binary cannot see; fail like a stale read.
+        for (abs, h) in &target_hashes {
+            if let Ok(bytes) = tokio::fs::read(abs).await {
+                if crate::hash_bytes(&bytes) != *h {
+                    return Err(FreedasError::StaleRead(
+                        "patch target changed before apply".into(),
+                    ));
+                }
             }
         }
         let unified = codex_to_unified(&ops, &ctx.project_root)?;
@@ -160,35 +213,36 @@ impl Tool for ApplyPatchTool {
         // TOCTOU: re-verify containment after the external `patch` run before
         // touching deletes natively.
         crate::verify_targets_contained(ctx, &target_strs)?;
+        for (abs, _) in &target_hashes {
+            if let Ok(bytes) = tokio::fs::read(abs).await {
+                crate::record_hash(ctx, abs, crate::hash_bytes(&bytes));
+            }
+        }
         // macOS BSD patch exits 0 on `--- a/f +++ /dev/null` deletes but
         // leaves the file behind emptied, not unlinked: complete every
         // delete natively. Missing means GNU patch already unlinked it.
-        for abs in &delete_paths {
+        for (path, abs) in &delete_paths {
             // Re-canonicalize right before the native delete: a symlink swap
             // since resolve must not redirect the unlink outside the project.
-            crate::reverify_abs(ctx, abs)?;
+            crate::reverify_abs(ctx, abs, path)?;
             match tokio::fs::metadata(abs).await {
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
                 Err(e) => {
                     return Err(FreedasError::Tool(format!(
-                        "delete target unreadable: {}: {e}",
-                        abs.display()
+                        "delete target unreadable: {path}: {e}"
                     )));
                 }
                 Ok(_) => {}
             }
             let content = tokio::fs::read(abs).await.map_err(|e| {
-                FreedasError::Tool(format!("delete target unreadable: {}: {e}", abs.display()))
+                FreedasError::Tool(format!("delete target unreadable: {path}: {e}"))
             })?;
             if content.is_empty() {
                 tokio::fs::remove_file(abs).await.map_err(|e| {
-                    FreedasError::Tool(format!("delete failed: {}: {e}", abs.display()))
+                    FreedasError::Tool(format!("delete failed: {path}: {e}"))
                 })?;
             } else {
-                return Err(FreedasError::Tool(format!(
-                    "delete did not remove {}",
-                    abs.display()
-                )));
+                return Err(FreedasError::Tool(format!("delete did not remove {path}")));
             }
         }
         Ok(out.unwrap_or(ToolOutput {
@@ -224,13 +278,13 @@ async fn apply_via_patch_bin(
     // Confine `patch` to the project with network denied; the permission gate
     // already refused to upgrade `ask` when no backend exists, so the direct
     // fallback below runs only after an explicit approval.
-    let wrap = |args: &[String]| -> Vec<String> {
+    let wrap = |args: &[String]| -> Result<Vec<String>> {
         let off = !ctx.sandbox
             || std::env::var("FREEDAS_EXPERIMENTAL_SANDBOX")
                 .map(|v| v == "false" || v == "0")
                 .unwrap_or(false);
         if off {
-            return args.to_vec();
+            return Ok(args.to_vec());
         }
         let root = ctx.project_root.clone();
         let policy = freedas_sandbox::SandboxPolicy {
@@ -245,25 +299,30 @@ async fn apply_via_patch_bin(
         let prog = args[0].clone();
         let rest: Vec<&str> = args[1..].iter().map(|s| s.as_str()).collect();
         match freedas_sandbox::wrap_command(&policy, &prog, &rest) {
-            Some(wrapped) => wrapped,
+            Some(wrapped) => Ok(wrapped),
+            None if ctx.config.sandbox.mode == "on" || ctx.approver.is_none() => {
+                Err(FreedasError::SandboxUnavailable(
+                    "no sandbox backend; refusing to run external patch unsandboxed".into(),
+                ))
+            }
             None => {
                 eprintln!(
                     "freedas: sandbox: no backend available; running patch without OS sandbox"
                 );
-                args.to_vec()
+                Ok(args.to_vec())
             }
         }
     };
     let mut dry = base.clone();
     dry.insert(1, "--dry-run".to_string());
-    let dry = wrap(&dry);
+    let dry = wrap(&dry)?;
     let (ok, stdout, stderr) = run_patch(ctx, &dry, diff).await?;
     if !ok {
         return Err(FreedasError::Tool(format!(
             "patch rejected (dry-run):\n{stdout}{stderr}"
         )));
     }
-    let base = wrap(&base);
+    let base = wrap(&base)?;
     let (ok, stdout, stderr) = run_patch(ctx, &base, diff).await?;
     if !ok {
         return Err(FreedasError::Tool(format!(

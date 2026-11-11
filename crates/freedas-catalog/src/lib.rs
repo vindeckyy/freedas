@@ -5,6 +5,8 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelInfo {
     pub provider: String,
+    /// Bare model id; never contains '/' (provider/id joins happen in
+    /// [`full_id`]), so `full_id` always splits unambiguously on the first '/'.
     pub id: String,
     pub name: String,
     pub context: u64,
@@ -12,11 +14,13 @@ pub struct ModelInfo {
     pub cost_input: f64,  // per 1M tokens
     pub cost_output: f64, // per 1M tokens
     pub cost_cache_read: f64,
+    #[serde(default)]
+    pub cost_cache_write: f64,
     pub tools: bool,
     pub reasoning: bool,
     pub vision: bool,
     pub quality: f32, // 0..1 prior
-    pub tier: String, // cheap|mid|frontier
+    pub tier: String, // free|cheap|mid|frontier
     pub variants: Vec<String>,
 }
 
@@ -24,8 +28,61 @@ impl ModelInfo {
     pub fn full_id(&self) -> String {
         format!("{}/{}", self.provider, self.id)
     }
+
+    /// Eligible for automatic routing: tool-capable and not a client-locked
+    /// free tier. Pins may still name a non-routable model explicitly.
+    pub fn routable(&self) -> bool {
+        self.tools && self.tier != "free"
+    }
+
+    /// The one cache-aware billed-cost function shared by gateway ledgers,
+    /// provider usage events, and router reservations.
+    pub fn usage_cost(&self, input: u64, cache_read: u64, cache_write: u64, output: u64) -> f64 {
+        let cached = cache_read.min(input);
+        let fresh = input.saturating_sub(cached);
+        (fresh as f64 * self.cost_input
+            + cached as f64 * self.cost_cache_read
+            + cache_write as f64 * self.cost_cache_write
+            + output as f64 * self.cost_output)
+            / 1e6
+    }
+
+    /// Worst-case reservation for `input`/`output` with `cached`/`written`
+    /// tokens already known, else 0: fresh input prices the whole prompt.
     pub fn estimate_cost(&self, input: u64, output: u64) -> f64 {
-        input as f64 / 1e6 * self.cost_input + output as f64 / 1e6 * self.cost_output
+        self.usage_cost(input, 0, 0, output)
+    }
+
+    /// Consistency gate for the const catalog and any future override loader:
+    /// ids stay pin-compatible, prices are finite and non-negative, quality is
+    /// a 0..1 prior, and limits are non-zero.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.provider.is_empty() || self.provider.contains('/') {
+            return Err(format!("bad provider {:?}", self.provider));
+        }
+        if self.id.is_empty() || self.id.contains('/') {
+            return Err(format!("bad id {:?}", self.id));
+        }
+        for (name, v) in [
+            ("cost_input", self.cost_input),
+            ("cost_output", self.cost_output),
+            ("cost_cache_read", self.cost_cache_read),
+            ("cost_cache_write", self.cost_cache_write),
+        ] {
+            if !v.is_finite() || v < 0.0 {
+                return Err(format!("{name} must be finite and >= 0, got {v}"));
+            }
+        }
+        if !(0.0..=1.0).contains(&self.quality) || !self.quality.is_finite() {
+            return Err(format!("quality must be in 0..=1, got {}", self.quality));
+        }
+        if self.context == 0 || self.max_output == 0 {
+            return Err("context and max_output must be non-zero".into());
+        }
+        if !["free", "cheap", "mid", "frontier"].contains(&self.tier.as_str()) {
+            return Err(format!("bad tier {:?}", self.tier));
+        }
+        Ok(())
     }
 }
 
@@ -44,7 +101,9 @@ pub fn builtin_catalog() -> Vec<ModelInfo> {
         ),
         mk(
             "openrouter",
-            "deepseek/deepseek-chat",
+            // Bare id: upstream name is `deepseek/deepseek-chat`, flattened so
+            // `full_id()` keeps the one-slash provider/id contract.
+            "deepseek-chat",
             "DeepSeek via OpenRouter",
             128_000,
             8_000,
@@ -128,6 +187,7 @@ pub fn builtin_catalog() -> Vec<ModelInfo> {
             cost_input: 0.10,
             cost_output: 0.20,
             cost_cache_read: 0.002,
+            cost_cache_write: 0.125,
             tools: true,
             reasoning: true,
             vision: true,
@@ -138,6 +198,7 @@ pub fn builtin_catalog() -> Vec<ModelInfo> {
     ]
     .into_iter()
     .chain(opencode_catalog())
+    .inspect(|m| debug_assert!(m.validate().is_ok(), "{}", m.full_id()))
     .collect()
 }
 
@@ -169,6 +230,9 @@ fn mk(
         cost_input,
         cost_output,
         cost_cache_read: cost_input * 0.1,
+        // No published write price for the hand-listed models; billing a cache
+        // write at the fresh-input rate is the documented provider floor.
+        cost_cache_write: cost_input,
         tools: true,
         reasoning,
         vision: true,
@@ -184,8 +248,13 @@ fn mk(
 }
 
 /// OpenCode Console / Go models, priced from https://opencode.ai/docs/console/models
-/// (pay-as-you-go, per 1M tokens). Jev is a separate SystemOne protocol and is
-/// not reachable through a chat-completions client, so it is not listed.
+/// (pay-as-you-go, per 1M tokens; snapshot `PRICING_AS_OF` — refresh the table
+/// against the docs page when bumping). Jev is a separate SystemOne protocol
+/// and is not reachable through a chat-completions client, so it is not listed.
+///
+/// Tuple fields: (id, name, cost_input, cost_output, cost_cache_read,
+/// cost_cache_write).
+pub const PRICING_AS_OF: &str = "2026-11-11";
 const OPENCODE_MODELS: &[(&str, &str, f64, f64, f64, f64)] = &[
     ("gpt-6-astra", "GPT 6 Astra", 10.0, 50.0, 1.0, 12.5),
     ("gpt-6-sol", "GPT 6 Sol", 2.0, 10.0, 0.2, 2.5),
@@ -432,7 +501,7 @@ fn opencode_catalog() -> Vec<ModelInfo> {
     OPENCODE_MODELS
         .iter()
         .map(
-            |(id, name, cost_input, cost_output, cost_cache_read, _cost_cache_write)| {
+            |(id, name, cost_input, cost_output, cost_cache_read, cost_cache_write)| {
                 let (context, max_output, vision, reasoning) = opencode_meta(id);
                 let quality = if *cost_output <= 1.0 {
                     0.55
@@ -463,6 +532,7 @@ fn opencode_catalog() -> Vec<ModelInfo> {
                     cost_input: *cost_input,
                     cost_output: *cost_output,
                     cost_cache_read: *cost_cache_read,
+                    cost_cache_write: *cost_cache_write,
                     tools: true,
                     reasoning,
                     vision,
@@ -518,5 +588,28 @@ mod tests {
         assert!(c.iter().any(|m| m.tier == "frontier"));
         let m = &c[0];
         assert!(m.estimate_cost(1_000_000, 1_000_000) > 0.0);
+    }
+
+    #[test]
+    fn every_row_validates_and_ids_stay_pin_compatible() {
+        for m in builtin_catalog() {
+            m.validate().unwrap_or_else(|e| panic!("{}: {e}", m.full_id()));
+            assert_eq!(m.full_id().matches('/').count(), 1);
+        }
+        // Zero-priced rows are always free tier, including the non-*-free ids.
+        let catalog = builtin_catalog();
+        let pickle = get_model(&catalog, "opencode-go/big-pickle").unwrap();
+        assert_eq!(pickle.tier, "free");
+        assert!(!pickle.routable());
+    }
+
+    #[test]
+    fn usage_cost_prices_cache_terms() {
+        let catalog = builtin_catalog();
+        let m = get_model(&catalog, "opencode-go/gpt-6-astra").unwrap();
+        // 1M fresh + 1M cached-read + 1M cache-write + 1M output.
+        let cost = m.usage_cost(2_000_000, 1_000_000, 1_000_000, 1_000_000);
+        let expect = 10.0 + 1.0 + 12.5 + 50.0;
+        assert!((cost - expect).abs() < 1e-9);
     }
 }

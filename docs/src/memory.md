@@ -47,11 +47,17 @@ land in user scope with confidence 0.7.
 ## Manage
 
 ```bash
-freedas memory list        # recall up to 50 records
-freedas memory show <id>   # one record with scope/kind/confidence
-freedas memory forget <id>
-freedas memory export      # write all records to stdout
+freedas memory list            # up to 50 records in the current project
+freedas memory list --global   # all scopes
+freedas memory show <id>       # one record with scope/kind/confidence
+freedas memory forget <id>     # project records only; --global for user scope
+freedas memory export          # write all records to stdout
 ```
+
+Commands are scoped to the current project by default — `forget` refuses to
+delete another project's records without `--global` — and `list`/`show`
+output passes through the redactor. Deleting a record leaves a tombstone so
+it is not re-distilled.
 
 ## Config
 

@@ -11,6 +11,7 @@ freedas-db = { path = "../freedas-db" }
 freedas-session = { path = "../freedas-session" }
 freedas-catalog = { path = "../freedas-catalog" }
 freedas-tools = { path = "../freedas-tools" }
+freedas-agent = { path = "../freedas-agent" }
 agent-client-protocol = "5.1"
 tokio.workspace = true
 serde.workspace = true

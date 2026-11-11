@@ -16,7 +16,7 @@ DATABASE_URL=postgres://... freedas-gateway \
 
 Flags:
 
-- `--upstream` / `FREEDAS_UPSTREAM_URL` - OpenAI-compatible base URL (default `https://api.openai.com/v1`).
+- `--upstream` - OpenAI-compatible base URL (default `https://api.openai.com/v1`). Precedence: flag, then `FREEDAS_GATEWAY_UPSTREAM`, then the deprecated `FREEDAS_UPSTREAM_URL` (warns), then the default.
 - `--database-url` / `DATABASE_URL` - required unless `--insecure-no-auth`.
 - `--provider-key PROVIDER=KEY` - upstream credential per provider, repeatable. Provider env vars are the fallback: `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, `OPENROUTER_API_KEY`, `DEEPSEEK_API_KEY`.
 - `--insecure-no-auth` - accept any non-empty bearer; no metering or budgets. Local testing only.
@@ -31,7 +31,7 @@ to start.
 |---|---|---|
 | GET | `/v1/models` | Models available to the workspace (only providers with a configured upstream key) |
 | POST | `/v1/chat/completions` | Stream or non-stream chat |
-| POST | `/v1/embeddings` | Embeddings (metered at a fixed rate; no catalog entries yet) |
+| POST | `/v1/embeddings` | Embeddings for the allowlisted models only (`text-embedding-3-small`, `text-embedding-3-large`, `text-embedding-ada-002`), metered at a fixed rate |
 
 Auth is `Authorization: Bearer <workspace token>`; the token hash resolves to
 a workspace and user. Optional `X-Freedas-Session` ties metering to a session.
@@ -54,7 +54,11 @@ Before dispatch, the estimated cost is reserved against the workspace
 balance; an insufficient balance returns `402`. On stream end the actual
 usage from the upstream `usage` chunk (or a token estimate) reconciles the
 ledger: the reservation is released and real cost is recorded as a
-`usage_events` row plus a `wallet_ledger` debit.
+`usage_events` row plus a `wallet_ledger` debit. A client that disconnects
+mid-stream still gets metered — metering fires on body drop as well as
+stream end — and a nonzero cost never debits less than one microdollar, so
+dust-priced requests are not free. A post-metering negative balance is
+logged at error level for alerting.
 
 ## Client use
 

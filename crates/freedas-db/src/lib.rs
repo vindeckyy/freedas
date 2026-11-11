@@ -42,6 +42,7 @@ CREATE TRIGGER IF NOT EXISTS memories_au AFTER UPDATE ON memories BEGIN INSERT I
 CREATE TABLE IF NOT EXISTS router_stats (task_class TEXT NOT NULL, model TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, successes INTEGER NOT NULL DEFAULT 0, failures INTEGER NOT NULL DEFAULT 0, total_cost_usd REAL NOT NULL DEFAULT 0, updated_at INTEGER NOT NULL, PRIMARY KEY(task_class, model));
 CREATE TABLE IF NOT EXISTS redo_stack (id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT NOT NULL, message_id TEXT NOT NULL, commit_sha TEXT NOT NULL, messages_json TEXT NOT NULL DEFAULT '{}', created_at INTEGER NOT NULL);
 CREATE INDEX IF NOT EXISTS redo_stack_session ON redo_stack(session_id);
+CREATE TABLE IF NOT EXISTS memory_tombstones (text_hash TEXT PRIMARY KEY, created_at INTEGER NOT NULL);
 ";
 
 /// Backfills the four indexes added to `SCHEMA_V1` late; databases already
@@ -54,11 +55,17 @@ CREATE INDEX IF NOT EXISTS tool_usage_session_created ON tool_usage(session_id, 
 CREATE INDEX IF NOT EXISTS redo_stack_session ON redo_stack(session_id);
  ";
 
+/// Forgotten memories: their text hashes are tombstoned so a later distill
+/// or import cannot silently re-learn a fact the operator deleted.
+const SCHEMA_V3: &str = "
+CREATE TABLE IF NOT EXISTS memory_tombstones (text_hash TEXT PRIMARY KEY, created_at INTEGER NOT NULL);
+";
+
 fn migrate(conn: &mut Connection) -> Result<()> {
     let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-    if version > 2 {
+    if version > 3 {
         return Err(freedas_core::FreedasError::Other(format!(
-            "database schema version {version} is newer than this build (2)"
+            "database schema version {version} is newer than this build (3)"
         )));
     }
     if version < 1 {
@@ -84,6 +91,10 @@ fn migrate(conn: &mut Connection) -> Result<()> {
         conn.execute_batch(SCHEMA_V2)?;
         conn.pragma_update(None, "user_version", 2)?;
     }
+    if version < 3 {
+        conn.execute_batch(SCHEMA_V3)?;
+        conn.pragma_update(None, "user_version", 3)?;
+    }
     Ok(())
 }
 
@@ -94,6 +105,19 @@ fn limit_i64(limit: usize) -> i64 {
 /// Snapshot SHAs (`^[0-9a-f]{4,64}$`): short or full lowercase hex object names.
 fn is_valid_commit_sha(s: &str) -> bool {
     (4..=64).contains(&s.len()) && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
+/// Live write paths get the same SHA check as the import path: an empty
+/// string stays allowed (it is the "no snapshot" sentinel), but anything
+/// else must look like a git object name before it is stored and later fed
+/// back to git commands.
+fn check_commit_sha(s: &str) -> Result<()> {
+    if !s.is_empty() && !is_valid_commit_sha(s) {
+        return Err(freedas_core::FreedasError::Other(format!(
+            "invalid commit sha `{s}`: expected 4-64 lowercase hex"
+        )));
+    }
+    Ok(())
 }
 
 /// Clamp `days` to a non-negative millisecond window that cannot overflow.
@@ -115,18 +139,15 @@ impl Db {
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            if !existed {
-                // Credentials-adjacent state; don't leave it world-readable.
-                let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
-            } else if let Ok(md) = std::fs::metadata(path)
+            if existed
+                && let Ok(md) = std::fs::metadata(path)
                 && md.permissions().mode() & 0o077 != 0
             {
                 static WARNED: std::sync::Once = std::sync::Once::new();
                 WARNED.call_once(|| {
                     eprintln!(
-                        "warning: database file {} has permissions {:o}; expected 0600",
-                        path.display(),
-                        md.permissions().mode() & 0o777
+                        "warning: database file {} had permissive mode; tightened to 0600",
+                        path.display()
                     );
                 });
             }
@@ -135,6 +156,25 @@ impl Db {
         conn.pragma_update(None, "foreign_keys", "ON")?;
         conn.pragma_update(None, "busy_timeout", 5000)?;
         migrate(&mut conn)?;
+        #[cfg(unix)]
+        {
+            // Tighten the db file and WAL sidecars after WAL mode creates
+            // them: transcripts are credentials-adjacent and must not sit
+            // world-readable on multi-user hosts.
+            use std::os::unix::fs::PermissionsExt;
+            for suffix in ["", "-wal", "-shm"] {
+                let p = if suffix.is_empty() {
+                    path.to_path_buf()
+                } else {
+                    let mut os = path.as_os_str().to_os_string();
+                    os.push(suffix);
+                    std::path::PathBuf::from(os)
+                };
+                if p.exists() {
+                    let _ = std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o600));
+                }
+            }
+        }
         Ok(Self {
             conn: Mutex::new(conn),
         })
@@ -240,6 +280,7 @@ impl Db {
         message_id: &str,
         commit_sha: &str,
     ) -> Result<(DeletedSet, i64)> {
+        check_commit_sha(commit_sha)?;
         let mut conn = self.lock();
         ensure_redo_table(&conn)?;
         let tx = conn.transaction()?;
@@ -270,6 +311,7 @@ impl Db {
         message_id: &str,
         commit_sha: &str,
     ) -> Result<(DeletedSet, i64)> {
+        check_commit_sha(commit_sha)?;
         let mut conn = self.lock();
         ensure_redo_table(&conn)?;
         let tx = conn.transaction()?;
@@ -290,18 +332,31 @@ impl Db {
         Ok((removed, redo_id))
     }
 
-    pub fn set_message_model(&self, message_id: &str, model: &serde_json::Value) -> Result<()> {
+    /// Message-scoped writes take the owning session id so a confused caller
+    /// cannot update another session's rows (message ids are unguessable but
+    /// the check is cheap).
+    pub fn set_message_model(
+        &self,
+        session_id: &str,
+        message_id: &str,
+        model: &serde_json::Value,
+    ) -> Result<()> {
         self.lock().execute(
-            "UPDATE messages SET model = ?2 WHERE id = ?1",
-            params![message_id, model.to_string()],
+            "UPDATE messages SET model = ?3 WHERE id = ?2 AND session_id = ?1",
+            params![session_id, message_id, model.to_string()],
         )?;
         Ok(())
     }
 
-    pub fn set_message_usage(&self, message_id: &str, usage: &serde_json::Value) -> Result<()> {
+    pub fn set_message_usage(
+        &self,
+        session_id: &str,
+        message_id: &str,
+        usage: &serde_json::Value,
+    ) -> Result<()> {
         self.lock().execute(
-            "UPDATE messages SET usage = ?2 WHERE id = ?1",
-            params![message_id, usage.to_string()],
+            "UPDATE messages SET usage = ?3 WHERE id = ?2 AND session_id = ?1",
+            params![session_id, message_id, usage.to_string()],
         )?;
         Ok(())
     }
@@ -535,13 +590,13 @@ impl Db {
         Ok(rows)
     }
 
-    pub fn list_parts(&self, message_id: &str) -> Result<Vec<PartRow>> {
+    pub fn list_parts(&self, session_id: &str, message_id: &str) -> Result<Vec<PartRow>> {
         let conn = self.lock();
         let mut stmt = conn.prepare(
-            "SELECT id, idx, kind, data, created_at FROM parts WHERE message_id = ?1 ORDER BY idx",
+            "SELECT id, idx, kind, data, created_at FROM parts WHERE message_id = ?2 AND session_id = ?1 ORDER BY idx",
         )?;
         let rows = stmt
-            .query_map(params![message_id], |r| {
+            .query_map(params![session_id, message_id], |r| {
                 Ok(PartRow {
                     id: r.get(0)?,
                     idx: r.get(1)?,
@@ -709,7 +764,9 @@ impl Db {
                 "SELECT m.kind, m.text FROM memories m \
                  JOIN memories_fts f ON f.rowid = m.rowid \
                  WHERE memories_fts MATCH ?1 {scope_clause} \
-                 ORDER BY bm25(memories_fts) LIMIT {limit_param}"
+                 ORDER BY bm25(memories_fts) - m.confidence * 2.0 \
+                   - MAX(0.0, 1.0 - (julianday('now') * 86400000.0 - m.created_at) / 2592000000.0) \
+                 LIMIT {limit_param}"
             );
             let mut stmt = conn.prepare(&sql)?;
             let lim = limit_i64(limit);
@@ -762,26 +819,66 @@ impl Db {
         Ok(rows)
     }
 
-    pub fn get_memory(&self, id: &str) -> Result<Option<(String, String, String, String)>> {
+    /// (scope, kind, text, confidence, project_id) for one memory row.
+    pub fn get_memory(
+        &self,
+        id: &str,
+    ) -> Result<Option<(String, String, String, String, Option<String>)>> {
         let conn = self.lock();
-        let mut stmt =
-            conn.prepare("SELECT scope, kind, text, confidence FROM memories WHERE id = ?1")?;
+        let mut stmt = conn
+            .prepare("SELECT scope, kind, text, confidence, project_id FROM memories WHERE id = ?1")?;
         let mut rows = stmt.query_map(params![id], |r| {
             Ok((
                 r.get::<_, String>(0)?,
                 r.get::<_, String>(1)?,
                 r.get::<_, String>(2)?,
                 r.get::<_, f64>(3)?.to_string(),
+                r.get::<_, Option<String>>(4)?,
             ))
         })?;
         Ok(rows.next().transpose()?)
     }
 
+    /// Hash used for forget tombstones: normalized text so trivial edits do
+    /// not defeat the tombstone.
+    fn memory_hash(text: &str) -> String {
+        use sha2::Digest;
+        let norm: String = text.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase();
+        sha2::Sha256::digest(norm.as_bytes())
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect()
+    }
+
+    /// A forgotten text is permanently suppressed from distill/import.
+    pub fn memory_tombstoned(&self, text: &str) -> bool {
+        self.lock()
+            .query_row(
+                "SELECT 1 FROM memory_tombstones WHERE text_hash = ?1",
+                params![Self::memory_hash(text)],
+                |_| Ok(true),
+            )
+            .optional()
+            .ok()
+            .flatten()
+            .unwrap_or(false)
+    }
+
+    /// Deletes the row and tombstones its text so distill cannot re-learn it.
+    /// Forgetting does not scrub existing transcripts or exports.
     pub fn delete_memory(&self, id: &str) -> Result<bool> {
-        Ok(self
-            .lock()
-            .execute("DELETE FROM memories WHERE id = ?1", params![id])?
-            > 0)
+        let conn = self.lock();
+        if let Ok(text) = conn.query_row(
+            "SELECT text FROM memories WHERE id = ?1",
+            params![id],
+            |r| r.get::<_, String>(0),
+        ) {
+            conn.execute(
+                "INSERT OR IGNORE INTO memory_tombstones (text_hash, created_at) VALUES (?1, ?2)",
+                params![Self::memory_hash(&text), freedas_core::paths::now_ms()],
+            )?;
+        }
+        Ok(conn.execute("DELETE FROM memories WHERE id = ?1", params![id])? > 0)
     }
 
     pub fn export_memory(&self) -> Result<String> {
@@ -802,7 +899,7 @@ impl Db {
                 cur = row.0.clone();
                 out.push_str(&format!("\n## {cur}\n"));
             }
-            out.push_str(&format!("- {}\n", row.1));
+            out.push_str(&format!("- {}\n", freedas_core::redact::redact(&row.1)));
         }
         Ok(out)
     }
@@ -835,6 +932,7 @@ impl Db {
         commit_sha: &str,
         removed: &DeletedSet,
     ) -> Result<i64> {
+        check_commit_sha(commit_sha)?;
         let conn = self.lock();
         ensure_redo_table(&conn)?;
         conn.execute(
@@ -883,22 +981,33 @@ impl Db {
     }
 
     /// Restore a popped redo set and drop its entry in one transaction.
-    pub fn apply_redo(&self, redo_id: i64, removed: &DeletedSet) -> Result<()> {
+    /// `session_id` is the caller's session: the redo row must belong to it
+    /// and must exist, failing closed rather than letting payload rows pick
+    /// the destination session.
+    pub fn apply_redo(&self, session_id: &str, redo_id: i64, removed: &DeletedSet) -> Result<()> {
         let mut conn = self.lock();
-        // The redo row owns the caller session; the payload must not override it.
-        let caller: Option<String> = conn
+        let owner: Option<String> = conn
             .query_row(
                 "SELECT session_id FROM redo_stack WHERE id = ?1",
                 params![redo_id],
                 |r| r.get(0),
             )
             .optional()?;
-        let session_id = caller
-            .or_else(|| removed.messages.first().map(|m| m.session_id.clone()))
-            .or_else(|| removed.usage.first().and_then(|u| u.session_id.clone()))
-            .unwrap_or_default();
+        match owner {
+            Some(o) if o == session_id => {}
+            Some(_) => {
+                return Err(freedas_core::FreedasError::Other(format!(
+                    "redo entry {redo_id} belongs to a different session"
+                )));
+            }
+            None => {
+                return Err(freedas_core::FreedasError::Other(format!(
+                    "redo entry {redo_id} no longer exists"
+                )));
+            }
+        }
         let tx = conn.transaction()?;
-        insert_set(&tx, &session_id, removed)?;
+        insert_set(&tx, session_id, removed)?;
         tx.execute("DELETE FROM redo_stack WHERE id = ?1", params![redo_id])?;
         tx.commit()?;
         Ok(())
@@ -934,18 +1043,18 @@ impl Db {
     }
 
     /// Re-insert captured messages, their parts, and usage rows with their
-    /// original ids (redo / import). Payload sessions are overwritten with the
-    /// caller session so a stale payload cannot scatter rows.
-    pub fn insert_messages(&self, removed: &DeletedSet) -> Result<()> {
-        let session_id = removed
-            .messages
-            .first()
-            .map(|m| m.session_id.clone())
-            .or_else(|| removed.usage.first().and_then(|u| u.session_id.clone()))
-            .unwrap_or_default();
+    /// original ids (redo / import) into the caller's session. Payload
+    /// session values are overwritten with `session_id` so a stale or
+    /// foreign payload cannot scatter rows into another session.
+    pub fn insert_messages(&self, session_id: &str, removed: &DeletedSet) -> Result<()> {
+        if session_id.is_empty() {
+            return Err(freedas_core::FreedasError::Other(
+                "insert_messages requires a session id".into(),
+            ));
+        }
         let mut conn = self.lock();
         let tx = conn.transaction()?;
-        insert_set(&tx, &session_id, removed)?;
+        insert_set(&tx, session_id, removed)?;
         tx.commit()?;
         Ok(())
     }
@@ -1779,7 +1888,7 @@ pub fn export_session(
     let mut msgs = Vec::new();
     for m in &messages {
         let parts = d
-            .list_parts(&m.id)?
+            .list_parts(&sid, &m.id)?
             .into_iter()
             .map(|p| {
                 serde_json::json!({
@@ -1813,7 +1922,7 @@ pub fn export_session(
         );
         for m in &messages {
             md.push_str(&format!("## {}\n\n", m.role));
-            for p in d.list_parts(&m.id)? {
+            for p in d.list_parts(&sid, &m.id)? {
                 let data: serde_json::Value = serde_json::from_str(&p.data).unwrap_or_default();
                 match p.kind.as_str() {
                     "text" | "reasoning" => {
@@ -1973,9 +2082,9 @@ mod tests {
         assert_eq!(removed.usage.len(), 1);
         assert!(db.list_messages(&sid).unwrap().is_empty());
         assert!(db.list_usage_rows(&sid).unwrap().is_empty());
-        db.insert_messages(&removed).unwrap();
+        db.insert_messages(&sid, &removed).unwrap();
         assert_eq!(db.list_messages(&sid).unwrap().len(), 1);
-        assert_eq!(db.list_parts(&mid).unwrap().len(), 1);
+        assert_eq!(db.list_parts(&sid, &mid).unwrap().len(), 1);
         assert_eq!(db.list_usage_rows(&sid).unwrap().len(), 1);
     }
 
@@ -1998,7 +2107,7 @@ mod tests {
         assert_eq!(row.removed.messages.len(), 1);
         // A pop is read-only so a failed redo can be retried.
         assert!(db.pop_redo(&sid).unwrap().is_some());
-        db.apply_redo(row.id, &row.removed).unwrap();
+        db.apply_redo(&sid, row.id, &row.removed).unwrap();
         assert!(db.pop_redo(&sid).unwrap().is_none());
     }
 
@@ -2016,7 +2125,7 @@ mod tests {
             .unwrap();
         db.add_part(&sid, &mid, 0, "text", &serde_json::json!({"text": "hi"}))
             .unwrap();
-        let parts = db.list_parts(&mid).unwrap();
+        let parts = db.list_parts(&sid, &mid).unwrap();
         assert_eq!(parts.len(), 1);
     }
 
@@ -2040,23 +2149,25 @@ mod tests {
         let db = Db::memory().unwrap();
         let (_dir, _pid, sid, mid) = seeded(&db);
         // An unknown boundary fails before anything is removed.
-        assert!(db.undo_messages(&sid, "msg_missing", "sha").is_err());
+        assert!(db.undo_messages(&sid, "msg_missing", "abc123").is_err());
+        // A malformed sha is rejected before anything is captured.
+        assert!(db.undo_messages(&sid, &mid, "not a sha!").is_err());
         assert_eq!(db.list_messages(&sid).unwrap().len(), 1);
-        let (removed, redo_id) = db.undo_messages(&sid, &mid, "sha").unwrap();
+        let (removed, redo_id) = db.undo_messages(&sid, &mid, "abc123").unwrap();
         assert_eq!(removed.messages.len(), 1);
         assert_eq!(removed.messages[0].parts.len(), 1);
         assert!(db.list_messages(&sid).unwrap().is_empty());
         assert!(db.list_usage_rows(&sid).unwrap().is_empty());
         let row = db.pop_redo(&sid).unwrap().expect("redo entry");
         assert_eq!(row.id, redo_id);
-        assert_eq!(row.commit_sha, "sha");
+        assert_eq!(row.commit_sha, "abc123");
     }
 
     #[test]
     fn attached_empty_capture_keeps_the_stored_redo_payload() {
         let db = Db::memory().unwrap();
         let (_dir, _pid, sid, mid) = seeded(&db);
-        let (removed, redo_id) = db.delete_messages_from(&sid, &mid, "sha").unwrap();
+        let (removed, redo_id) = db.delete_messages_from(&sid, &mid, "abc123").unwrap();
         assert_eq!(removed.messages.len(), 1);
         db.attach_redo_messages(redo_id, &DeletedSet::default())
             .unwrap();
@@ -2070,7 +2181,7 @@ mod tests {
     fn corrupt_redo_payload_errors_and_keeps_the_entry() {
         let db = Db::memory().unwrap();
         let (_dir, _pid, sid, mid) = seeded(&db);
-        let (_removed, _redo_id) = db.delete_messages_from(&sid, &mid, "sha").unwrap();
+        let (_removed, _redo_id) = db.delete_messages_from(&sid, &mid, "abc123").unwrap();
         db.lock()
             .execute("UPDATE redo_stack SET messages_json = 'not json'", [])
             .unwrap();
@@ -2229,7 +2340,7 @@ mod tests {
         let path = dir.path().join("db.sqlite");
         {
             let conn = Connection::open(&path).unwrap();
-            conn.pragma_update(None, "user_version", 3).unwrap();
+            conn.pragma_update(None, "user_version", 4).unwrap();
         }
         assert!(Db::open(&path).is_err());
     }
@@ -2239,10 +2350,10 @@ mod tests {
         let db = Db::memory().unwrap();
         let (_dir, pid, sid, mid) = seeded(&db);
         let fork = db.fork_session(&pid, &sid, Some(&mid)).unwrap();
-        let original_parts = db.list_parts(&mid).unwrap();
+        let original_parts = db.list_parts(&sid, &mid).unwrap();
         let copied = db.list_messages(&fork).unwrap();
         assert_eq!(copied.len(), 1);
-        let copied_parts = db.list_parts(&copied[0].id).unwrap();
+        let copied_parts = db.list_parts(&fork, &copied[0].id).unwrap();
         assert_eq!(copied_parts[0].created_at, original_parts[0].created_at);
         assert_eq!(db.list_usage_rows(&fork).unwrap().len(), 1);
         // The fork keeps the source id under a new session.

@@ -6,6 +6,12 @@ command (`/<id>`) and the model can load it through the `skill` tool.
 
 ## Discovery
 
+Project-scoped skills (`.freedas/skills`, `.claude/skills`, `.agents/skills`)
+load only when the project layer is trusted (`trust_project_code` or
+`FREEDAS_TRUST_PROJECT_CODE=1`); untrusted sources are skipped with a
+warning. A shadowed skill — one whose ID collides with an earlier source —
+is flagged in `skill list` at every scope it appears in.
+
 Sources are searched in this order; a later source replaces an earlier skill
 with the same ID:
 
@@ -67,10 +73,13 @@ freedas skill push <name> [--dir <path>]
 freedas skill pull <name> [--global] [--force]
 ```
 
-`push` packs the directory into a gzip tarball and uploads it with a SHA-256;
-`pull` verifies the hash and extracts to `.freedas/skills/<name>` (or
-`~/.config/freedas/skills/` with `--global`). If the target exists and
-differs, pull refuses without `--force`.
+`push` packs the directory into a gzip tarball and uploads it with a SHA-256
+— registry writes need an owner/admin role on the workspace. `pull` verifies
+the hash, requires the registry URL to be HTTPS (loopback exempt), and
+extracts to `.freedas/skills/<name>` (or `~/.config/freedas/skills/` with
+`--global`), rejecting entries that escape the target directory. If the
+target exists and differs, pull refuses without `--force`. `forget` removes
+the skill from every root that contains it, not just the first.
 
 The registry base URL comes from `FREEDAS_REGISTRY`, else
 `FREEDAS_CONTROL_URL`/`FREEDAS_API_URL` with `/registry` appended, else

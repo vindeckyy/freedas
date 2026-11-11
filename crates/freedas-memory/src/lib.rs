@@ -28,6 +28,11 @@ impl Memory {
         if redacted != text {
             return None;
         }
+        // A forgotten text stays forgotten: tombstoned rows cannot be
+        // re-imported or re-distilled.
+        if self.db.memory_tombstoned(&redacted) {
+            return None;
+        }
         // A row with project scope but NULL project_id is never recalled
         // (recall filters `project_id = ? OR scope = 'user'`), so global
         // memories must use user scope.

@@ -18,6 +18,8 @@ pub struct Task {
 #[derive(Debug, Serialize)]
 pub struct BenchResult {
     pub task_id: String,
+    /// Only sandboxed runs count toward the pass total.
+    pub verified: bool,
     pub passed: bool,
     pub cost_usd: f64,
     pub tokens: u64,
@@ -118,8 +120,22 @@ pub fn parse_task_yaml(text: &str) -> Result<Task, String> {
         fields.insert(key.to_string(), value.trim().to_string());
     }
 
+    let id = fields.remove("id").ok_or("task.yaml missing id")?;
+    // The id becomes a filesystem component and a log token: a tight charset
+    // rejects traversal, absolute paths, and control-character forgery.
+    let id_ok = !id.is_empty()
+        && id.len() <= 64
+        && !id.contains("..")
+        && id.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'));
+    if !id_ok {
+        return Err(format!("task.yaml id {id:?} must match [A-Za-z0-9_-]"));
+    }
+    for leftover in fields.keys() {
+        eprintln!("freedas-bench: ignoring unknown task.yaml key {leftover:?}");
+    }
     Ok(Task {
-        id: fields.remove("id").ok_or("task.yaml missing id")?,
+        id,
         prompt: fields.remove("prompt").ok_or("task.yaml missing prompt")?,
         repo: fields.remove("repo").ok_or("task.yaml missing repo")?,
         base_branch: fields
@@ -145,11 +161,23 @@ fn strip_comment(value: &str) -> &str {
 
 pub fn list_tasks(suite: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
+    let root = suite
+        .canonicalize()
+        .unwrap_or_else(|_| suite.to_path_buf());
     if let Ok(entries) = std::fs::read_dir(suite) {
         for e in entries.flatten() {
+            // Symlinked entries would pull task content from outside the suite.
+            if e.file_type().map(|t| t.is_symlink()).unwrap_or(true) {
+                continue;
+            }
             let p = e.path();
-            if p.is_dir() && p.join("task.yaml").exists() {
-                out.push(p);
+            if !p.is_dir() || !p.join("task.yaml").exists() {
+                continue;
+            }
+            if let Ok(canon) = p.canonicalize()
+                && canon.starts_with(&root)
+            {
+                out.push(canon);
             }
         }
     }
@@ -158,7 +186,9 @@ pub fn list_tasks(suite: &Path) -> Vec<PathBuf> {
 }
 
 /// Run one task's tests; convenience wrapper that drops the sandbox flag.
-pub async fn run_task_tests(repo: &Path, task_dir: &Path) -> bool {
+/// Test-only: production callers must see `verified`, not just `passed`.
+#[cfg(test)]
+async fn run_task_tests(repo: &Path, task_dir: &Path) -> bool {
     run_task_tests_verified(repo, task_dir).await.passed
 }
 
@@ -184,7 +214,17 @@ pub async fn run_task_tests_verified(repo: &Path, task_dir: &Path) -> TaskOutcom
         .clamp(1, 60);
     let tests_dir = task_dir.join("tests");
     let script = tests_dir.join("run.sh");
+    // A symlinked run.sh (or tests dir) would execute content outside the
+    // suite; require the resolved path to stay inside the task directory.
+    let task_root = task_dir
+        .canonicalize()
+        .unwrap_or_else(|_| task_dir.to_path_buf());
+    let script_ok = script
+        .canonicalize()
+        .map(|c| c.starts_with(&task_root))
+        .unwrap_or(false);
     let (program, args, task_env): (String, Vec<String>, Vec<(String, String)>) = if script.exists()
+        && script_ok
     {
         (
             "/bin/bash".to_string(),
@@ -216,6 +256,14 @@ pub async fn run_task_tests_verified(repo: &Path, task_dir: &Path) -> TaskOutcom
     let (argv, verified) = match freedas_sandbox::wrap_command(&policy, &program, &arg_refs) {
         Some(wrapped) => (wrapped, true),
         None => {
+            // Untrusted test code without a sandbox is a fail, not a pass —
+            // opt in explicitly for trusted suites on bare-metal machines.
+            if std::env::var("FREEDAS_BENCH_ALLOW_UNSANDBOXED").as_deref() != Ok("1") {
+                eprintln!(
+                    "freedas: sandbox: no backend; refusing untrusted bench tests                      (set FREEDAS_BENCH_ALLOW_UNSANDBOXED=1 to override)"
+                );
+                return fail(false);
+            }
             eprintln!("freedas: sandbox: no backend available; running bench without OS sandbox");
             let mut v = vec![program.clone()];
             v.extend(args.clone());
@@ -231,7 +279,7 @@ pub async fn run_task_tests_verified(repo: &Path, task_dir: &Path) -> TaskOutcom
         .env_clear()
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
-    for (k, v) in bench_env() {
+    for (k, v) in bench_env(repo) {
         command.env(k, v);
     }
     for (k, v) in task_env {
@@ -258,18 +306,16 @@ pub async fn run_task_tests_verified(repo: &Path, task_dir: &Path) -> TaskOutcom
     }
 }
 
-/// Minimal environment for bench test subprocesses: PATH/HOME/TMP plus locale.
-/// Provider keys and tokens never reach the task's tests.
-fn bench_env() -> Vec<(String, String)> {
-    const KEYS: &[&str] = &[
-        "PATH", "HOME", "TMPDIR", "TMP", "TEMP", "LANG", "SHELL", "USER", "LOGNAME",
-    ];
-    let mut out = Vec::new();
-    for (k, v) in std::env::vars() {
-        if KEYS.contains(&k.as_str()) || k.starts_with("LC_") {
-            out.push((k, v));
-        }
-    }
+/// Minimal environment for bench test subprocesses: PATH/TMP plus locale.
+/// Provider keys, tokens, and the user's real HOME never reach the task's
+/// tests; HOME is the checked-out repo so writes stay in the workspace.
+fn bench_env(repo: &Path) -> Vec<(String, String)> {
+    const KEYS: &[&str] = &["PATH", "TMPDIR", "TMP", "TEMP", "LANG"];
+    let mut out: Vec<(String, String)> = std::env::vars()
+        .filter(|(k, _)| KEYS.contains(&k.as_str()) || k.starts_with("LC_"))
+        .collect();
+    out.push(("HOME".to_string(), repo.to_string_lossy().into_owned()));
+    out.push(("USER".to_string(), "freedas-bench".to_string()));
     out
 }
 
@@ -289,7 +335,8 @@ unsafe extern "C" {
 }
 
 pub fn summarize(results: &[BenchResult]) -> String {
-    let passed = results.iter().filter(|r| r.passed).count();
+    // An unsandboxed PASS proves nothing; only verified runs count.
+    let passed = results.iter().filter(|r| r.passed && r.verified).count();
     let total_cost: f64 = results.iter().map(|r| r.cost_usd).sum();
     let total_tokens: u64 = results.iter().map(|r| r.tokens).sum();
     let mean_cost = if results.is_empty() {
@@ -357,12 +404,14 @@ timeout_minutes: 5
         let results = vec![
             BenchResult {
                 task_id: "a".into(),
+                verified: true,
                 passed: true,
                 cost_usd: 0.10,
                 tokens: 100,
             },
             BenchResult {
                 task_id: "b".into(),
+                verified: true,
                 passed: false,
                 cost_usd: 0.20,
                 tokens: 200,

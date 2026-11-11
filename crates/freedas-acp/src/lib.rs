@@ -9,7 +9,7 @@ fn project_config_disabled() -> bool {
 }
 
 use std::collections::HashMap;
-use std::io::{self, BufRead, Write};
+use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -25,6 +25,17 @@ use serde_json::{Value, json};
 const OUTPUT_CAP: usize = 1024 * 1024;
 /// How long a tool call waits for the ACP client to answer a permission prompt.
 const PERMISSION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(600);
+
+/// Largest stdio frame accepted before the peer is cut off.
+const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
+/// Largest file read served to a client.
+const MAX_READ_BYTES: u64 = 5 * 1024 * 1024;
+/// Largest file write accepted from a client.
+const MAX_WRITE_BYTES: usize = 5 * 1024 * 1024;
+/// Open sessions, in-flight prompts, live terminals.
+const MAX_SESSIONS: usize = 64;
+const MAX_PROMPTS: usize = 8;
+const MAX_TERMINALS: usize = 32;
 
 #[derive(Clone)]
 struct Session {
@@ -132,12 +143,19 @@ pub struct AcpServer {
     next_perm: Arc<AtomicU64>,
     terminals: HashMap<String, Terminal>,
     next_terminal: u64,
+    /// Roots a `session/new` cwd may live under; the launch directory plus
+    /// anything the host opts into.
+    allowed_roots: Vec<PathBuf>,
 }
 
 impl AcpServer {
     pub fn new(db: Arc<Db>) -> Self {
+        let launch = std::env::current_dir()
+            .and_then(|d| d.canonicalize())
+            .unwrap_or_else(|_| PathBuf::from("/"));
         Self {
             db,
+            allowed_roots: vec![launch],
             sessions: HashMap::new(),
             cancels: HashMap::new(),
             pending: Arc::new(std::sync::Mutex::new(Vec::new())),
@@ -225,11 +243,28 @@ impl AcpServer {
     }
 
     fn new_session(&mut self, id: Value, params: &Value) -> Vec<String> {
+        if self.sessions.len() >= MAX_SESSIONS {
+            return vec![rpc_error(id, -32000, "too many sessions".into())];
+        }
         let cwd = params
             .get("cwd")
             .and_then(Value::as_str)
             .map(PathBuf::from)
             .unwrap_or_else(|| Session::fallback().cwd);
+        // The client must not pivot the agent into a tree the launcher did
+        // not grant: the session root stays inside an allowed root.
+        let cwd = match cwd.canonicalize() {
+            Ok(abs) => abs,
+            Err(error) => return vec![rpc_error(id, -32602, format!("cwd: {error}"))],
+        };
+        let any_cwd = std::env::var("FREEDAS_ACP_ALLOW_ANY_CWD").is_ok_and(|v| v == "1");
+        if !any_cwd && !self.allowed_roots.iter().any(|r| cwd.starts_with(r)) {
+            return vec![rpc_error(
+                id,
+                -32602,
+                "cwd is outside the allowed workspace roots".to_string(),
+            )];
+        }
         let agent = params
             .get("agent")
             .and_then(Value::as_str)
@@ -296,6 +331,23 @@ impl AcpServer {
         let Some(agent) = agent else {
             return vec![rpc_error(id, -32602, "missing modeId".into())];
         };
+        let Some(cwd) = self.sessions.get(session_id).map(|s| s.cwd.clone()) else {
+            return vec![rpc_error(id, -32602, "unknown session".into())];
+        };
+        // Only advertised agents may be selected; an arbitrary string here
+        // would widen tool access for later prompts.
+        let trust = freedas_core::config::load(
+            &freedas_core::paths::Paths::resolve(cwd.clone()),
+            false,
+        )
+        .map(|c| c.trust_project_code)
+        .unwrap_or(false);
+        let known = freedas_agent::merged_agents(&cwd, trust)
+            .iter()
+            .any(|a| a.id == agent);
+        if !known {
+            return vec![rpc_error(id, -32602, format!("unknown mode: {agent}"))];
+        }
         match self.sessions.get_mut(session_id) {
             Some(session) => {
                 session.agent = agent.to_owned();
@@ -341,6 +393,9 @@ impl AcpServer {
         let Some(session) = self.sessions.get(session_id).cloned() else {
             return vec![rpc_error(id, -32602, "unknown session".into())];
         };
+        if self.cancels.len() >= MAX_PROMPTS {
+            return vec![rpc_error(id, -32000, "too many prompts in flight".into())];
+        }
         let response_id = id.clone();
         let token = tokio_util::sync::CancellationToken::new();
         self.cancels.insert(session_id.to_string(), token.clone());
@@ -587,13 +642,24 @@ impl AcpServer {
             Ok(file) => file,
             Err(error) => return vec![rpc_error(id, -32602, error)],
         };
-        match std::fs::read(&file) {
-            Ok(bytes) => vec![response(
-                id,
-                json!({ "content": String::from_utf8_lossy(&bytes) }),
-            )],
-            Err(error) => vec![rpc_error(id, -32000, error.to_string())],
+        let bytes = match std::fs::File::open(&file) {
+            Ok(f) => {
+                let mut buf = Vec::new();
+                let mut take = std::io::Read::take(f, MAX_READ_BYTES + 1);
+                match std::io::Read::read_to_end(&mut take, &mut buf) {
+                    Ok(_) => buf,
+                    Err(error) => return vec![rpc_error(id, -32000, error.to_string())],
+                }
+            }
+            Err(error) => return vec![rpc_error(id, -32000, error.to_string())],
+        };
+        if bytes.len() as u64 > MAX_READ_BYTES {
+            return vec![rpc_error(id, -32000, "file too large (>5 MiB)".into())];
         }
+        vec![response(
+            id,
+            json!({ "content": String::from_utf8_lossy(&bytes) }),
+        )]
     }
 
     fn write_text_file(&mut self, id: Value, params: &Value) -> Vec<String> {
@@ -606,6 +672,9 @@ impl AcpServer {
         let Some(content) = params.get("content").and_then(Value::as_str) else {
             return vec![rpc_error(id, -32602, "missing content".into())];
         };
+        if content.len() > MAX_WRITE_BYTES {
+            return vec![rpc_error(id, -32000, "content too large (>5 MiB)".into())];
+        }
         let ctx = self.permission_ctx(&session_id, &session, "edit", path);
         if let Err(error) = freedas_tools::check_perm(&ctx, "edit", Some(path)) {
             return self.perm_error(id, &session_id, error);
@@ -626,6 +695,9 @@ impl AcpServer {
     }
 
     fn terminal_create(&mut self, id: Value, params: &Value) -> Vec<String> {
+        if self.terminals.len() >= MAX_TERMINALS {
+            return vec![rpc_error(id, -32000, "too many terminals".into())];
+        }
         let Some((session_id, session)) = self.session(params) else {
             return vec![rpc_error(id, -32602, "unknown session".into())];
         };
@@ -1207,11 +1279,44 @@ pub async fn run_stdio() -> io::Result<()> {
     // stream `session/update` notifications while the client waits.
     let (tx, mut rx) = tokio::sync::mpsc::channel::<String>(64);
     tokio::task::spawn_blocking(move || {
+        use std::io::BufRead;
         let stdin = io::stdin();
         let mut lines = stdin.lock();
-        let mut line = String::new();
-        while lines.read_line(&mut line).unwrap_or(0) != 0 {
-            if tx.blocking_send(std::mem::take(&mut line)).is_err() {
+        // Byte-counted line read: a peer that never stops writing one "line"
+        // is drained and dropped instead of OOMing the process.
+        loop {
+            let mut over = false;
+            let mut bytes: Vec<u8> = Vec::new();
+            loop {
+                let buf = match lines.fill_buf() {
+                    Ok(b) if !b.is_empty() => b,
+                    _ => break, // EOF
+                };
+                let take = buf
+                    .iter()
+                    .position(|b| *b == b'\n')
+                    .map(|p| p + 1)
+                    .unwrap_or(buf.len());
+                if bytes.len() + take > MAX_FRAME_BYTES {
+                    over = true;
+                } else if !over {
+                    bytes.extend_from_slice(&buf[..take]);
+                }
+                let nl = buf[..take].contains(&b'\n');
+                lines.consume(take);
+                if nl {
+                    break;
+                }
+            }
+            if bytes.is_empty() && !over {
+                break;
+            }
+            let line = if over {
+                "{\"jsonrpc\":\"2.0\",\"method\":\"__oversize\"}\n".to_string()
+            } else {
+                String::from_utf8_lossy(&bytes).into_owned()
+            };
+            if tx.blocking_send(line).is_err() {
                 break;
             }
         }
@@ -1274,7 +1379,11 @@ mod tests {
     use super::*;
 
     fn server() -> AcpServer {
-        AcpServer::new(Arc::new(Db::memory().unwrap()))
+        let mut s = AcpServer::new(Arc::new(Db::memory().unwrap()));
+        if let Ok(t) = std::env::temp_dir().canonicalize() {
+            s.allowed_roots.push(t);
+        }
+        s
     }
 
     async fn call(server: &mut AcpServer, method: &str, params: Value) -> Vec<Value> {

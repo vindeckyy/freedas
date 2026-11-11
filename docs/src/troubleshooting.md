@@ -38,6 +38,24 @@ more with `grep -rn "your message" crates/`.
 - **`sandbox-mode-on-unavailable` / exit code 5**
   `sandbox.mode = "on"` but neither `sandbox-exec` (macOS) nor `bwrap` (Linux)
   is available. Install the backend or switch to `auto`/`off`.
+- **Headless run fails with `sandbox: no backend available`**
+  Headless `bash` requires a sandbox backend — there is no approver, so
+  running bare is not an option. Install `sandbox-exec`/`bwrap`, set
+  `sandbox.mode = "off"`, or `FREEDAS_EXPERIMENTAL_SANDBOX=false`.
+- **Project agents, skills, commands, plugins, or `mcp` servers are ignored**
+  The project layer is untrusted. Set `trust_project_code` in a global
+  config for that repo or export `FREEDAS_TRUST_PROJECT_CODE=1`.
+- **A stored control-plane token stops working after ~30 days**
+  Human API tokens carry a 30-day expiry since minting. Sign in again
+  (`freedas providers login freedas`); sandbox-scoped tokens expire in one
+  hour by design.
+- **`workspace budget would be exceeded by this sandbox` (402)**
+  The workspace budget is spent past its limit for the period. Raise the
+  budget or wait for the next period; this is a hard gate, not a warning.
+- **Bench task tests fail with `refusing untrusted bench tests`**
+  No sandbox backend was available. Results without containment are
+  unverified and do not count; `FREEDAS_BENCH_ALLOW_UNSANDBOXED=1` opts in
+  on trusted suites.
 - **`standalone worktree is unavailable: not in a git repository`**
   `--worktree` needs a git checkout. Run inside a repo.
 - **`cancelled` in the transcript**

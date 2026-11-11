@@ -140,11 +140,20 @@ pub fn discover(project_root: &Path) -> Vec<PluginInfo> {
 
     let mut seen = HashSet::new();
     let mut plugins = Vec::new();
-    for info in scan_plugins(&project)
-        .into_iter()
-        .chain(scan_plugins(&global))
-        .chain(scan_installed(&installed))
-    {
+    for info in scan_plugins(&project) {
+        // Auto-discovered project plugins are repo-controlled code: apply the
+        // same hash trust as configured path entries before they can load.
+        if matches!(info.kind, PluginKind::Wasm | PluginKind::Js)
+            && let Err(e) = ensure_config_plugin_trusted(&info, false)
+        {
+            eprintln!("plugin {}: {e}", info.id);
+            continue;
+        }
+        if seen.insert(info.id.clone()) {
+            plugins.push(info);
+        }
+    }
+    for info in scan_plugins(&global).into_iter().chain(scan_installed(&installed)) {
         if seen.insert(info.id.clone()) {
             plugins.push(info);
         }
@@ -474,6 +483,9 @@ pub fn load_manifest(path: &Path) -> Option<PluginManifest> {
 }
 
 /// Hook names a plugin may subscribe to.
+/// Events that must never degrade to a silent no-op on plugin failure.
+const SENSITIVE_HOOKS: &[&str] = &["permission.ask", "tool.before", "gate.result"];
+
 pub fn hooks_available() -> Vec<&'static str> {
     vec![
         "session.start",
@@ -515,8 +527,8 @@ impl Plugin {
     pub fn initialize(&self, config_json: &str) -> Result<String, String> {
         let entry = self.resolve_entry()?;
         match self.kind {
-            PluginKind::Wasm => wasm_init(&entry, config_json),
-            PluginKind::Js => js_init(&entry, config_json),
+            PluginKind::Wasm => wasm_init(&verify_entry_trust(&entry)?, config_json),
+            PluginKind::Js => js_init(&verify_entry_trust(&entry)?, config_json),
             PluginKind::Process => process_init(&entry, config_json),
         }
     }
@@ -533,7 +545,10 @@ impl Plugin {
         match self.try_hook(event, payload) {
             Ok(out) => Ok(out),
             Err(error) => {
-                if self.is_required() {
+                // Security-relevant hooks fail closed regardless of the
+                // `required` flag: "no opinion" cannot silently stand in for
+                // a permission gate, input rewrite, or gate verdict.
+                if self.is_required() || SENSITIVE_HOOKS.contains(&event) {
                     eprintln!(
                         "plugin {} is required and failed hook {event}: {error}",
                         self.id
@@ -570,8 +585,8 @@ impl Plugin {
     fn dispatch_hook(&self, event: &str, payload: &str) -> Result<Option<String>, String> {
         let entry = self.resolve_entry()?;
         let out = match self.kind {
-            PluginKind::Wasm => wasm_hook(&entry, event, payload)?,
-            PluginKind::Js => js_hook(&entry, event, payload)?,
+            PluginKind::Wasm => wasm_hook(&verify_entry_trust(&entry)?, event, payload)?,
+            PluginKind::Js => js_hook(&verify_entry_trust(&entry)?, event, payload)?,
             PluginKind::Process => process_hook(&entry, event, payload)?,
         };
         Ok(if out.trim().is_empty() || out == "null" {
@@ -1015,6 +1030,22 @@ fn process_init(path: &Path, config_json: &str) -> Result<String, String> {
 /// The process is killed and reaped on every path, including a write or read error, so
 /// no zombie survives. A reply that does not arrive within [`HANDSHAKE_TIMEOUT`] fails
 /// the call.
+/// Re-verify WASM/JS entry bytes against `trusted_plugins.json` at every
+/// load/hook so a file swapped after the discovery-time approval cannot
+/// execute. Mirrors `process_request`'s pre-spawn re-hash: fails closed on
+/// mismatch; unrecorded hashes take the normal approval path.
+fn verify_entry_trust(path: &Path) -> Result<PathBuf, String> {
+    let (path, expected) = check_or_record_trust(path, "plugin")?;
+    let actual = hash_file(&path)?;
+    if actual != expected {
+        return Err(format!(
+            "plugin {} changed after the trust check; refusing to load",
+            path.display()
+        ));
+    }
+    Ok(path)
+}
+
 fn process_request(path: &Path, method: &str, params: Value) -> Result<String, String> {
     // Spawn the same canonical file whose hash was approved.
     let (path, expected) = ensure_process_trusted(path)?;
@@ -1147,6 +1178,13 @@ fn hash_file(path: &Path) -> Result<String, String> {
 }
 
 fn trust_file() -> PathBuf {
+    // `FREEDAS_PLUGIN_TRUST_FILE` relocates the approval store; operators and
+    // CI can pin an isolated trust db without touching the default one.
+    if let Ok(custom) = std::env::var("FREEDAS_PLUGIN_TRUST_FILE")
+        && !custom.is_empty()
+    {
+        return PathBuf::from(custom);
+    }
     freedas_core::Paths::resolve(PathBuf::new())
         .data_dir
         .join(TRUST_FILE)
@@ -1204,6 +1242,46 @@ fn parse_process_response(line: &str) -> Result<String, String> {
     }
 }
 
+/// Test-only trust store: `FREEDAS_PLUGIN_TRUST_FILE` points at a shared
+/// temp file so direct `Plugin` construction can record approvals without
+/// touching the real store. `trust()` serializes writers for parallel tests.
+#[cfg(test)]
+static TEST_TRUST_DIR: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
+#[cfg(test)]
+static TEST_TRUST_LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+
+#[cfg(test)]
+fn test_trust_store() -> PathBuf {
+    TEST_TRUST_DIR
+        .get_or_init(|| {
+            let dir = tempfile::tempdir().unwrap();
+            unsafe {
+                std::env::set_var(
+                    "FREEDAS_PLUGIN_TRUST_FILE",
+                    dir.path().join("trusted_plugins.json"),
+                );
+            }
+            dir
+        })
+        .path()
+        .join("trusted_plugins.json")
+}
+
+/// Record `path`'s current hash as approved in the shared test trust store.
+#[cfg(test)]
+fn trust(path: &Path) {
+    let _guard = TEST_TRUST_LOCK
+        .get_or_init(|| std::sync::Mutex::new(()))
+        .lock()
+        .unwrap();
+    let store = test_trust_store();
+    let entry = fs::canonicalize(path).unwrap();
+    let hash = hash_file(&entry).unwrap();
+    let mut trusted = read_trust(&store);
+    trusted.insert(entry.to_string_lossy().into_owned(), hash);
+    write_trust(&store, &trusted).unwrap();
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1235,6 +1313,7 @@ mod tests {
             "globalThis.freedasInit = (cfg) => JSON.stringify({ ok: true, cfg });",
         )
         .unwrap();
+        trust(&path);
         let plugin = Plugin {
             id: "p".into(),
             kind: PluginKind::Js,
@@ -1285,6 +1364,7 @@ mod tests {
         assert_eq!(found[0].plugin.id, "plain");
         assert_eq!(found[0].options, serde_json::json!({}));
         assert_eq!(found[1].options, serde_json::json!({"issuer": "acme"}));
+        trust(&found[1].plugin.path);
         let out = found[1].initialize().unwrap();
         assert!(out.contains("acme"), "options must reach initialize: {out}");
     }
@@ -1361,6 +1441,7 @@ mod tests {
             &dir.path().join("config"),
         );
         assert_eq!(found.len(), 1, "{found:?}");
+        trust(&package.join("dist").join("plugin.js"));
         found[0].initialize().unwrap();
     }
 
@@ -1484,6 +1565,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(plugin_in_dir(&plugin_dir).unwrap().id, "acme.reviewer");
+        trust(&plugin_dir.join("index.js"));
         let plugin = Plugin {
             id: "acme.reviewer".into(),
             kind: PluginKind::Js,
@@ -1512,6 +1594,7 @@ mod tests {
             "globalThis.freedasHook = () => { throw new Error('boom'); };",
         )
         .unwrap();
+        trust(&path);
         let plugin = Plugin {
             id: "failing-hook-plugin".into(),
             kind: PluginKind::Js,
@@ -1530,6 +1613,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("spin.js");
         std::fs::write(&path, "globalThis.freedasHook = () => { for (;;) {} };").unwrap();
+        trust(&path);
         let plugin = Plugin {
             id: "spinning-js-plugin".into(),
             kind: PluginKind::Js,
@@ -1553,6 +1637,7 @@ mod tests {
     (i64.const 0)))"#,
         )
         .unwrap();
+        trust(&path);
         let plugin = Plugin {
             id: "spinning-wasm-plugin".into(),
             kind: PluginKind::Wasm,
@@ -1601,8 +1686,9 @@ mod hook_tests {
 };"#,
         )
         .unwrap();
+        trust(&path);
         let plugin = Plugin {
-            id: "p".into(),
+            id: "hook-prompt-rewrite".into(),
             kind: PluginKind::Js,
             path,
         };
@@ -1620,8 +1706,9 @@ mod hook_tests {
             "globalThis.freedasHook = (event) => JSON.stringify({ event });",
         )
         .unwrap();
+        trust(&path);
         let plugin = Plugin {
-            id: "p".into(),
+            id: "hook-any-event".into(),
             kind: PluginKind::Js,
             path,
         };
@@ -1649,6 +1736,7 @@ mod hook_tests {
                 .to_string(),
         )
         .unwrap();
+        trust(&dir.path().join("boom.js"));
         let plugin = Plugin {
             id: "required-hook-fails-closed".into(),
             kind: PluginKind::Js,
@@ -1799,7 +1887,54 @@ async fn install_npm(name: &str, data_dir: &Path) -> Result<serde_json::Value, S
         serde_json::json!({"name": name, "version": version, "integrity": integrity}).to_string(),
     )
     .map_err(|e| e.to_string())?;
+    // Record the entry hash so load-time re-verification passes: the install
+    // is itself the approval event, anchored by the registry integrity pin.
+    record_installed_trust(&dir);
     Ok(serde_json::json!(dir.to_string_lossy()))
+}
+
+/// Pin an installed package's entry hash into `trusted_plugins.json` so the
+/// load-time re-verification has a recorded anchor for registry plugins.
+fn record_installed_trust(dir: &Path) {
+    let Some(manifest) = load_manifest(&dir.join(MANIFEST_FILE)) else {
+        return;
+    };
+    let Some(kind) = PluginKind::from_name(&manifest.kind) else {
+        return;
+    };
+    let plugin = Plugin {
+        id: manifest.id.clone(),
+        kind,
+        path: dir.to_path_buf(),
+    };
+    let Ok(entry) = plugin.resolve_entry() else {
+        return;
+    };
+    let Ok(hash) = hash_file(&entry) else {
+        return;
+    };
+    let key = fs::canonicalize(&entry)
+        .unwrap_or(entry)
+        .to_string_lossy()
+        .into_owned();
+    let store = trust_file();
+    let mut trusted = read_trust(&store);
+    trusted.insert(key, hash);
+    let _ = write_trust(&store, &trusted);
+}
+
+/// Drop trust-store entries under a removed directory so `plugin remove`
+/// does not leave approvable path/hash pairs behind for a later squatter.
+pub fn prune_trust(dir: &Path) {
+    let canon = fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
+    let prefix = canon.to_string_lossy().to_string();
+    let store = trust_file();
+    let mut trusted = read_trust(&store);
+    let before = trusted.len();
+    trusted.retain(|key, _| !key.starts_with(&prefix));
+    if trusted.len() != before {
+        let _ = write_trust(&store, &trusted);
+    }
 }
 
 /// Unpack staging directory for one install: the package name keeps concurrent
@@ -1954,10 +2089,44 @@ pub async fn update(data_dir: &Path) -> Result<Vec<String>, String> {
         let Some(name) = v["name"].as_str() else {
             continue;
         };
+        // A version bump is new upstream code: require the same explicit
+        // opt-in used for plugin trust so silent re-trust cannot happen.
+        let pinned_version = v["version"].as_str().unwrap_or("");
+        if let Ok(latest) = latest_version(name).await
+            && latest != pinned_version
+            && !trust_opt_in()
+        {
+            eprintln!(
+                "plugin {name}: upstream changed {pinned_version} -> {latest};                  re-run with {TRUST_ENV}=1 to approve the new code"
+            );
+            continue;
+        }
         install_npm(name, data_dir).await?;
         updated.push(name.to_string());
     }
     Ok(updated)
+}
+
+/// Latest published version for `name` in the configured npm registry.
+async fn latest_version(name: &str) -> Result<String, String> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let registry = npm_registry();
+    let base = registry.as_deref().unwrap_or("https://registry.npmjs.org");
+    let meta: Value = client
+        .get(format!("{base}/{name}/latest"))
+        .send()
+        .await
+        .map_err(|e| format!("registry: {e}"))?
+        .json()
+        .await
+        .map_err(|e| format!("registry response: {e}"))?;
+    meta["version"]
+        .as_str()
+        .map(str::to_string)
+        .ok_or_else(|| "no version in registry response".to_string())
 }
 
 #[cfg(test)]

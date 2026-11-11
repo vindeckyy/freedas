@@ -375,11 +375,18 @@ pub fn record_apply_all(project_root: &Path, entries: &[(String, String, String)
     if let Some(parent) = ledger_path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    let _ = std::fs::write(
-        &ledger_path,
+    // tmp+rename: a crash mid-write must not leave a truncated ledger that
+    // makes applied imports look unapplied.
+    let tmp = unique_tmp(&ledger_path);
+    if std::fs::write(
+        &tmp,
         serde_json::to_string_pretty(&serde_json::json!({"version": 1, "entries": ledger}))
             .unwrap_or_default(),
-    );
+    )
+    .is_ok()
+    {
+        let _ = std::fs::rename(&tmp, &ledger_path);
+    }
 }
 
 /// Record a successful import in `.freedas/sync.json`.
@@ -478,6 +485,24 @@ fn unique_tmp(target: &Path) -> PathBuf {
     }
 }
 
+/// True when no component of `path` (inclusive) up to and excluding `root`
+/// is a symlink, and `path` is actually under `root`. A planted symlink at
+/// the target or any ancestor must not carry writes outside the project.
+fn no_symlink_components(root: &Path, path: &Path) -> bool {
+    let mut cur = Some(path);
+    while let Some(p) = cur {
+        if p == root {
+            return true;
+        }
+        match std::fs::symlink_metadata(p) {
+            Ok(m) if m.file_type().is_symlink() => return false,
+            _ => {}
+        }
+        cur = p.parent();
+    }
+    false
+}
+
 /// Copy a skill directory via a temp dir then rename, so a failed or killed
 /// copy never leaves a half-written target. Existing backups are never
 /// deleted; a fresh unique `.bak` name is used per conflict. The target must
@@ -488,11 +513,7 @@ fn copy_dir_atomic(
     project_root: &Path,
 ) -> std::io::Result<Option<PathBuf>> {
     // Belt and suspenders: the caller checks `target_within_root`, and this
-    // asserts it again so a future caller cannot silently escape the project.
-    assert!(
-        target.starts_with(project_root),
-        "copy target escapes project root"
-    );
+    // rejects it again so a future caller cannot silently escape the project.
     if !target.starts_with(project_root) {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
@@ -508,6 +529,14 @@ fn copy_dir_atomic(
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
             format!("copy target escapes project root: {}", target.display()),
+        ));
+    }
+    // A symlinked target or ancestor (`.freedas`, `skills`, the dir itself)
+    // would carry writes outside the project; refuse before touching it.
+    if !no_symlink_components(project_root, target) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("copy target crosses a symlink: {}", target.display()),
         ));
     }
     let mut backup: Option<PathBuf> = None;
@@ -564,17 +593,54 @@ fn copy_dir_atomic(
 /// what gets applied.
 pub fn apply_plan(project_root: &Path, entries: &[PlanEntry]) -> std::io::Result<(usize, usize)> {
     let agents = project_root.join("AGENTS.md");
+    // A planted AGENTS.md symlink (or symlinked ancestor) must not carry the
+    // merged write outside the project; the file is replaced, not followed.
+    if !no_symlink_components(project_root, &agents) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("AGENTS.md crosses a symlink: {}", agents.display()),
+        ));
+    }
     let mut content = std::fs::read_to_string(&agents).unwrap_or_default();
     let (mut applied, mut skipped) = (0usize, 0usize);
+    let mut agents_changed = false;
     // Defer ledger writes until the file changes have landed; recording first
     // would mark content imported even if the write then failed.
     let mut pending: Vec<(String, String, String)> = Vec::new();
     for e in entries {
         // A crafted `PlanEntry` must not escape the project: refuse absolute
-        // paths and any `..`, and re-check the joined path stays inside.
-        if !target_within_root(project_root, &e.target) {
+        // paths and any `..`, and re-check the joined path stays inside. The
+        // source gets the same treatment: absolute/`..` sources would read
+        // outside the root.
+        if e.target.is_empty()
+            || e.source.is_empty()
+            || !target_within_root(project_root, &e.target)
+            || !target_within_root(project_root, &e.source)
+        {
             skipped += 1;
             continue;
+        }
+        // Only exact, expected targets apply: merge writes AGENTS.md and
+        // copydir writes `.freedas/skills/<name>` — nothing else.
+        match e.kind.as_str() {
+            "merge" if e.target != "AGENTS.md" => {
+                skipped += 1;
+                continue;
+            }
+            "copydir"
+                if !e
+                    .target
+                    .strip_prefix(".freedas/skills/")
+                    .is_some_and(is_valid_skill_name) =>
+            {
+                skipped += 1;
+                continue;
+            }
+            "merge" | "copydir" => {}
+            _ => {
+                skipped += 1;
+                continue;
+            }
         }
         let src = resolve_src(project_root, &e.source);
         let key = ledger_key(project_root, &e.source);
@@ -588,6 +654,15 @@ pub fn apply_plan(project_root: &Path, entries: &[PlanEntry]) -> std::io::Result
                 skipped += 1;
                 continue;
             };
+            // A source embedding our own marker syntax would nest sections
+            // inside other sections or wedge the file: quarantine, don't merge.
+            if c.contains("freedas:sync:") {
+                eprintln!(
+                    "freedas sync: {key} embeds sync markers; skipped to avoid nested sections"
+                );
+                skipped += 1;
+                continue;
+            }
             // A malformed marker pair would otherwise silently truncate
             // everything after the begin marker; refuse instead.
             if !markers_intact(&content, &key) {
@@ -599,22 +674,11 @@ pub fn apply_plan(project_root: &Path, entries: &[PlanEntry]) -> std::io::Result
                 ));
             }
             content = merge_agents_md(&content, &key, &c);
+            agents_changed = true;
             pending.push((key, e.target.clone(), hash));
             applied += 1;
         } else if e.kind == "copydir" {
-            // Defense in depth: `detect` only emits `[a-z0-9-_]+` names, but a
-            // stored plan could predate validation.
-            if let Some(name) = e.target.strip_prefix(".freedas/skills/")
-                && !is_valid_skill_name(name)
-            {
-                skipped += 1;
-                continue;
-            }
             let target = project_root.join(&e.target);
-            assert!(
-                target.starts_with(project_root),
-                "copy target escapes project root"
-            );
             match copy_dir_atomic(&src, &target, project_root) {
                 Ok(backup) => {
                     if let Some(bak) = backup {
@@ -627,15 +691,22 @@ pub fn apply_plan(project_root: &Path, entries: &[PlanEntry]) -> std::io::Result
                     pending.push((key, e.target.clone(), hash));
                     applied += 1;
                 }
-                Err(_) => {
-                    eprintln!("conflict: {} exists and differs; left in place", e.target);
+                Err(err) => {
+                    eprintln!("conflict: {} skipped: {err}", e.target);
                     skipped += 1;
                 }
             }
         }
     }
-    // Write the merged instructions before recording them.
-    std::fs::write(&agents, &content)?;
+    // Write the merged instructions only when a merge actually applied, and
+    // via tmp+rename so a crash never leaves a half-written file. The
+    // no-symlink check above ran before reads; the rename replaces the link
+    // rather than following it, which is the behavior we want anyway.
+    if agents_changed {
+        let tmp = unique_tmp(&agents);
+        std::fs::write(&tmp, &content)?;
+        std::fs::rename(&tmp, &agents)?;
+    }
     record_apply_all(project_root, &pending);
     Ok((applied, skipped))
 }

@@ -272,6 +272,10 @@ pub fn discover_with(project_root: &Path, extra: &[String]) -> Vec<Skill> {
         };
         roots.push((dir, true));
     }
+    discover_in_roots(roots)
+}
+
+fn discover_in_roots(roots: Vec<(PathBuf, bool)>) -> Vec<Skill> {
     let mut skills: Vec<Skill> = Vec::new();
     let mut project_scoped: Vec<bool> = Vec::new();
     for (root, is_project) in roots {
@@ -330,12 +334,21 @@ pub fn discover_with(project_root: &Path, extra: &[String]) -> Vec<Skill> {
 
 fn upsert(skills: &mut Vec<Skill>, origins: &mut Vec<bool>, mut skill: Skill, is_project: bool) {
     if let Some(pos) = skills.iter().position(|x| x.id == skill.id) {
-        let was_project = origins.remove(pos);
+        origins.remove(pos);
         let old = skills.remove(pos);
         if old.body == skill.body && old.description == skill.description {
             skill.shadowed = old.shadowed;
-        } else if is_project && (!was_project || old.shadowed) {
+        } else {
+            // Flag every same-id replacement: project-over-global,
+            // project-over-project, and global-over-global alike, so a
+            // frontmatter `name:` can never silently squat an existing id.
             skill.shadowed = true;
+            eprintln!(
+                "freedas: skill '{}' shadowed: {} replaces {}",
+                skill.id,
+                skill.source.display(),
+                old.source.display()
+            );
         }
         skills.push(skill);
         origins.push(is_project);
@@ -372,6 +385,85 @@ fn walk(dir: &Path, depth: usize) -> Vec<PathBuf> {
         }
     }
     out
+}
+
+/// Remove every copy of `id` discoverable under the same roots
+/// `discover_with` scans: folder skills at any depth (matched by frontmatter
+/// id, not just directory name) and flat `<id>.md` files. Returns each
+/// removed path so the caller can report survivors accurately.
+pub fn forget_skill(project_root: &Path, extra: &[String], id: &str) -> Vec<PathBuf> {
+    let home = home_base();
+    let mut roots: Vec<PathBuf> = Vec::new();
+    if let Some(h) = &home {
+        roots.push(h.join(".claude").join("skills"));
+        roots.push(h.join(".agents").join("skills"));
+        roots.push(h.join(".config").join("freedas").join("skills"));
+    }
+    for dir in ancestor_dirs(project_root) {
+        roots.push(dir.join(".claude").join("skills"));
+        roots.push(dir.join(".agents").join("skills"));
+        roots.push(dir.join(".freedas").join("skills"));
+    }
+    for dir in extra {
+        let dir = if Path::new(dir).is_absolute() {
+            PathBuf::from(dir)
+        } else {
+            project_root.join(dir)
+        };
+        roots.push(dir);
+    }
+    let mut removed = Vec::new();
+    for root in roots {
+        if !root.exists() {
+            continue;
+        }
+        // Folder skills: parse each SKILL.md so a frontmatter `name:` that
+        // differs from its directory name is still matched.
+        for entry in walk(&root, 0) {
+            if !entry.file_name().map(|n| n == "SKILL.md").unwrap_or(false) {
+                continue;
+            }
+            let dir_id = entry
+                .parent()
+                .and_then(|p| p.file_name())
+                .map(|s| s.to_string_lossy().to_string())
+                .unwrap_or_default();
+            if let Some(skill) = parse_skill_file(&entry, dir_id)
+                && skill.id == id
+                && let Some(dir) = entry.parent()
+                && std::fs::remove_dir_all(dir).is_ok()
+            {
+                removed.push(dir.to_path_buf());
+            }
+        }
+        // Flat one-file skills at the root level.
+        if let Ok(entries) = std::fs::read_dir(&root) {
+            for e in entries.flatten() {
+                let p = e.path();
+                let is_flat_md = p.extension().map(|x| x == "md").unwrap_or(false)
+                    && p.file_name().map(|n| n != "SKILL.md").unwrap_or(true)
+                    && !p
+                        .file_name()
+                        .map(|n| n.to_string_lossy().starts_with('.'))
+                        .unwrap_or(false)
+                    && p.is_file();
+                if !is_flat_md {
+                    continue;
+                }
+                let stem = p
+                    .file_stem()
+                    .map(|s| s.to_string_lossy().to_string())
+                    .unwrap_or_default();
+                if let Some(skill) = parse_skill_file(&p, stem)
+                    && skill.id == id
+                    && std::fs::remove_file(&p).is_ok()
+                {
+                    removed.push(p);
+                }
+            }
+        }
+    }
+    removed
 }
 
 pub fn find<'a>(skills: &'a [Skill], id: &str) -> Option<&'a Skill> {

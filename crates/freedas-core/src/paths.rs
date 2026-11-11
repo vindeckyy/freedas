@@ -49,6 +49,7 @@ pub struct Paths {
 
 impl Paths {
     pub fn resolve(project_root: PathBuf) -> Self {
+        log_env_overrides_once();
         Self::resolve_with(project_root, |name: &str| std::env::var_os(name))
     }
 
@@ -100,6 +101,13 @@ impl Paths {
     }
 
     pub fn ensure_dirs(&self) -> std::io::Result<()> {
+        let mut builder = std::fs::DirBuilder::new();
+        builder.recursive(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            builder.mode(0o700);
+        }
         for dir in [
             &self.config_dir,
             &self.data_dir,
@@ -107,10 +115,53 @@ impl Paths {
             &self.cache_dir,
             &self.plans_dir(),
         ] {
-            std::fs::create_dir_all(dir)?;
+            builder.create(dir)?;
+            set_private_dir(dir);
         }
         Ok(())
     }
+}
+
+/// Config/data/state/cache dirs hold credentials and databases; keep them
+/// 0700. Existing dirs are tightened when group/other bits are set.
+#[cfg(unix)]
+fn set_private_dir(dir: &std::path::Path) {
+    use std::os::unix::fs::PermissionsExt;
+    if let Ok(meta) = std::fs::metadata(dir)
+        && meta.permissions().mode() & 0o077 != 0
+    {
+        let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
+    }
+}
+
+#[cfg(not(unix))]
+fn set_private_dir(_dir: &std::path::Path) {}
+
+/// Surface every FREEDAS_* env override that repoints a trust root, once per
+/// process, so an environment-planted config/data redirect is visible.
+fn log_env_overrides_once() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let active: Vec<String> = [
+            "FREEDAS_HOME",
+            "FREEDAS_CONFIG_DIR",
+            "FREEDAS_DATA",
+            "FREEDAS_STATE",
+            "FREEDAS_CACHE",
+            "FREEDAS_DB",
+            "FREEDAS_CONFIG",
+            "FREEDAS_CONFIG_ANCESTORS",
+            "FREEDAS_TRUST_PROJECT_CODE",
+            "FREEDAS_MODEL",
+        ]
+        .iter()
+        .filter(|n| std::env::var_os(n).is_some_and(|v| !v.is_empty()))
+        .map(|n| n.to_string())
+        .collect();
+        if !active.is_empty() {
+            tracing::warn!("env overrides active: {}", active.join(", "));
+        }
+    });
 }
 
 /// Canonicalize the project directory. Config discovery walks ancestors from

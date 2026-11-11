@@ -77,9 +77,18 @@ fn is_executable_file(path: &Path) -> bool {
 }
 
 fn esc(p: &Path) -> String {
-    p.to_string_lossy()
-        .replace('\\', "\\\\")
-        .replace('"', "\\\"")
+    // Escape the SBPL string-breakout characters plus control characters so a
+    // path containing e.g. a newline cannot splice in an extra profile rule.
+    let mut out = String::new();
+    for c in p.to_string_lossy().chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            c if c.is_control() => out.push_str(&format!("\\x{:02x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 fn network_allowed(network: &str) -> bool {
@@ -98,7 +107,7 @@ pub fn macos_profile(policy: &SandboxPolicy) -> String {
     // ~/.cargo/bin, `cargo install` binaries in ~/.local/bin, and toolchains
     // under /opt. Allow exec there; everything else stays deny-by-default.
     let mut exec_rule = String::from(
-        "(allow process-exec (subpath \"/bin\") (subpath \"/usr/bin\") (subpath \"/usr/sbin\") (subpath \"/usr/local/bin\") (subpath \"/opt\")",
+        "(allow process-exec (subpath \"/bin\") (subpath \"/usr/bin\") (subpath \"/usr/sbin\") (subpath \"/usr/local/bin\") (subpath \"/opt/homebrew/bin\") (subpath \"/opt/local/bin\") (subpath \"/opt/bin\")",
     );
     if let Ok(home) = std::env::var("HOME")
         && !home.is_empty()
@@ -139,8 +148,11 @@ pub fn macos_profile(policy: &SandboxPolicy) -> String {
             s.push_str(&format!("(allow file-read-data (literal \"{dir}\"))\n"));
         }
     }
-    // Writes stay limited to temp dirs and the policy's write roots.
-    s.push_str("(allow file-write* (subpath \"/tmp\") (subpath \"/private/tmp\") (subpath \"/private/var/folders\")");
+    // Host-shared /tmp writes are denied: callers export a per-run TMPDIR
+    // (added as a write root) so staged data is not visible cross-run.
+    // /private/var/folders stays writable because DARWIN_USER_TEMP_DIR lives
+    // under it and system APIs need confstr() to keep working.
+    s.push_str("(allow file-write* (subpath \"/private/var/folders\")");
     for p in &policy.write {
         s.push_str(&format!(" (subpath \"{}\")", esc(p)));
     }

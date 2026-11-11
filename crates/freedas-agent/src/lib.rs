@@ -122,30 +122,71 @@ pub fn find<'a>(agents: &'a [AgentDef], id: &str) -> Option<&'a AgentDef> {
     agents.iter().find(|a| a.id == id)
 }
 
+fn project_config_disabled() -> bool {
+    std::env::var("FREEDAS_DISABLE_PROJECT_CONFIG")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
 /// Agent directories in precedence order: global first, project last so the
-/// project wins when both define the same id.
-fn agent_dirs(project_root: &Path) -> Vec<PathBuf> {
+/// project wins when both define the same id. Each entry carries whether the
+/// directory is operator-controlled; project files are repository content and
+/// only load when the caller has decided the repo's code is trusted.
+fn agent_dirs(project_root: &Path, trust_project: bool) -> Vec<(PathBuf, bool)> {
     let mut dirs = Vec::new();
     if let Some(home) = home_base() {
-        dirs.push(home.join(".config").join("freedas").join("agents"));
+        dirs.push((home.join(".config").join("freedas").join("agents"), true));
     }
-    dirs.push(project_root.join(".freedas").join("agents"));
+    let project_dir = project_root.join(".freedas").join("agents");
+    if !trust_project || project_config_disabled() {
+        if project_dir.exists() {
+            eprintln!(
+                "freedas: ignoring {} (untrusted project agents; set trust_project_code in global config or FREEDAS_TRUST_PROJECT_CODE=1 to load)",
+                project_dir.display()
+            );
+        }
+    } else {
+        dirs.push((project_dir, false));
+    }
     dirs
 }
 
+/// Fence operator-visible provenance around repository-sourced prompt text so
+/// the model can tell agent-file content from built-in instructions.
+fn fence_untrusted(id: &str, body: &str) -> String {
+    format!("[untrusted project agent file: {id}]\n{body}\n[end of project agent file]")
+}
+
+/// Whether a deny `resource` pattern covers an allow/ask `resource` pattern.
+/// Conservative: `*`, an identical pattern, or a `prefix*` glob whose prefix
+/// the allow shares.
+fn deny_subsumes(deny_res: &str, allow_res: &str) -> bool {
+    deny_res == "*"
+        || deny_res == allow_res
+        || (deny_res.ends_with('*') && allow_res.starts_with(deny_res.trim_end_matches('*')))
+}
+
 /// Load custom agents from `.freedas/agents/**/*.md` and `~/.config/freedas/agents/`.
-/// A file without `mode:` defaults to `primary`.
-pub fn load_custom(project_root: &Path) -> Vec<AgentDef> {
+/// A file without `mode:` defaults to `primary` in global dirs and `subagent`
+/// in project dirs. Project files only load when `trust_project` is set.
+pub fn load_custom(project_root: &Path, trust_project: bool) -> Vec<AgentDef> {
     let mut out = Vec::new();
-    for dir in agent_dirs(project_root) {
+    for (dir, trusted_source) in agent_dirs(project_root, trust_project) {
         if !dir.exists() {
             continue;
         }
         for path in walk_md(&dir) {
             match parse_agent_file(&path, &dir) {
                 Ok(mut def) => {
+                    if !trusted_source {
+                        def.system = fence_untrusted(&def.id, &def.system);
+                    }
                     if def.mode.is_empty() {
-                        def.mode = "primary".into();
+                        def.mode = if trusted_source {
+                            "primary".into()
+                        } else {
+                            "subagent".into()
+                        };
                     }
                     out.push(def);
                 }
@@ -160,9 +201,9 @@ pub fn load_custom(project_root: &Path) -> Vec<AgentDef> {
 /// the built-in. `mode` only replaces when the custom file sets it. A custom
 /// override can never widen a built-in `deny`: custom `allow`/`ask` rules on
 /// an identical `(action, resource)` are dropped at merge time.
-pub fn merged_agents(project_root: &Path) -> Vec<AgentDef> {
+pub fn merged_agents(project_root: &Path, trust_project: bool) -> Vec<AgentDef> {
     let mut agents = builtin_agents();
-    for dir in agent_dirs(project_root) {
+    for (dir, trusted_source) in agent_dirs(project_root, trust_project) {
         if !dir.exists() {
             continue;
         }
@@ -176,24 +217,42 @@ pub fn merged_agents(project_root: &Path) -> Vec<AgentDef> {
             };
             let mode_present = !custom.mode.is_empty();
             if custom.mode.is_empty() {
-                custom.mode = "primary".into();
+                custom.mode = if trusted_source {
+                    "primary".into()
+                } else {
+                    "subagent".into()
+                };
+            } else if !trusted_source && custom.mode == "primary" {
+                // Repository files must not surface as a primary agent in the
+                // picker; demote silently rather than trusting the frontmatter.
+                custom.mode = "subagent".into();
             }
             if let Some(existing) = agents.iter_mut().find(|a| a.id == custom.id) {
                 if custom.disabled {
-                    agents.retain(|a| a.id != custom.id);
+                    if !existing.builtin || trusted_source {
+                        // A project file can never strip a built-in agent;
+                        // `disable:` still works for global files and for
+                        // removing other custom ids.
+                        agents.retain(|a| a.id != custom.id || a.builtin);
+                    }
                     continue;
                 }
                 if !custom.description.is_empty() {
                     existing.description = custom.description;
                 }
-                if custom.model.is_some() {
+                if custom.model.is_some() && trusted_source {
                     existing.model = custom.model;
                 }
                 if custom.label.is_some() {
                     existing.label = custom.label;
                 }
                 if !custom.system.trim().is_empty() {
-                    existing.system = format!("{}\n\n{}", existing.system, custom.system);
+                    let appended = if trusted_source {
+                        custom.system.clone()
+                    } else {
+                        fence_untrusted(&custom.id, &custom.system)
+                    };
+                    existing.system = format!("{}\n\n{}", existing.system, appended);
                 }
                 // Built-in denies are a security boundary: a same-id custom
                 // override may add rules but must never widen a built-in deny,
@@ -213,12 +272,16 @@ pub fn merged_agents(project_root: &Path) -> Vec<AgentDef> {
                         r.effect == "deny"
                             || !denied
                                 .iter()
-                                .any(|(a, res)| a == &r.action && res == &r.resource)
+                                .any(|(a, res)| a == &r.action && deny_subsumes(res, &r.resource))
                     }));
-                if mode_present {
+                if mode_present && (trusted_source || custom.mode == "subagent") {
                     existing.mode = custom.mode;
                 }
             } else if !custom.disabled {
+                if !trusted_source {
+                    custom.system = fence_untrusted(&custom.id, &custom.system);
+                    custom.model = None;
+                }
                 agents.push(custom);
             }
         }
@@ -565,7 +628,7 @@ mod tests {
             "---\nlabel: Migration Reviewer\ndescription: Review migrations\nmode: subagent\npermission:\n  edit: deny\n  bash:\n    \"*\": ask\n    git push *: deny\n---\nBody",
         )
         .unwrap();
-        let custom = load_custom(dir.path());
+        let custom = load_custom(dir.path(), true);
         assert_eq!(custom.len(), 1);
         assert_eq!(custom[0].id, "team/reviewer");
         assert_eq!(custom[0].label.as_deref(), Some("Migration Reviewer"));
@@ -599,7 +662,7 @@ mod tests {
             "---\r\nmode: subagent\r\npermission:\r\n  edit: deny\r\n  bash:\r\n    \"*\": ask\r\n---\r\nBody",
         )
         .unwrap();
-        let custom = load_custom(dir.path());
+        let custom = load_custom(dir.path(), true);
         assert_eq!(custom.len(), 1);
         assert_eq!(custom[0].mode, "subagent");
         assert!(
@@ -628,7 +691,7 @@ mod tests {
             "---\nmode: subagent\npermission:\n  edit: deny\n  bash: {\"*\": ask, git push *: deny}\n---\nBody",
         )
         .unwrap();
-        let custom = load_custom(dir.path());
+        let custom = load_custom(dir.path(), true);
         assert_eq!(custom.len(), 1);
         assert!(
             custom[0].permissions.iter().any(|p| {
@@ -647,7 +710,7 @@ mod tests {
             "---\nmode: subagent\npermission: {edit: deny, bash: {\"*\": ask}}\n---\nBody",
         )
         .unwrap();
-        let custom = load_custom(dir.path());
+        let custom = load_custom(dir.path(), true);
         let inline = custom.iter().find(|a| a.id == "inline").unwrap();
         assert!(
             inline
@@ -673,22 +736,33 @@ mod tests {
             "---\npermission:\n  bash: {\"*\": ask\n---\nBody",
         )
         .unwrap();
-        assert!(load_custom(dir.path()).is_empty());
+        assert!(load_custom(dir.path(), true).is_empty());
     }
 
     #[test]
     fn project_agents_are_loaded_last() {
-        let dirs = agent_dirs(Path::new("/proj"));
+        let dirs = agent_dirs(Path::new("/proj"), true);
         assert_eq!(
-            dirs.last(),
+            dirs.last().map(|(d, _)| d),
             Some(&PathBuf::from("/proj").join(".freedas").join("agents"))
         );
         if dirs.len() > 1 {
             assert!(
-                dirs[0].ends_with(Path::new(".config").join("freedas").join("agents")),
+                dirs[0]
+                    .0
+                    .ends_with(Path::new(".config").join("freedas").join("agents")),
                 "global agents must load before project agents: {dirs:?}"
             );
         }
+    }
+
+    #[test]
+    fn untrusted_project_agents_are_skipped() {
+        let dirs = agent_dirs(Path::new("/proj"), false);
+        assert!(
+            dirs.iter().all(|(d, _)| !d.starts_with("/proj")),
+            "untrusted project agent dir must not be searched: {dirs:?}"
+        );
     }
 
     #[test]
@@ -711,7 +785,7 @@ mod tests {
             "---\ndescription: Review migrations\nmode: subagent\nmodel: anthropic/claude-sonnet-4-5\n---\nYou review migrations.",
         )
         .unwrap();
-        let custom = load_custom(dir.path());
+        let custom = load_custom(dir.path(), true);
         assert_eq!(custom.len(), 1);
         assert_eq!(custom[0].id, "reviewer");
         assert_eq!(custom[0].mode, "subagent");

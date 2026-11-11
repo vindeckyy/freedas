@@ -30,6 +30,7 @@ freedas-provider = { path = "../freedas-provider" }
 freedas-lsp = { path = "../freedas-lsp" }
 jsonc-parser.workspace = true
 ulid.workspace = true
+sha2 = "0.10"
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }

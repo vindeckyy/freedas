@@ -129,7 +129,6 @@ async fn daemon_registers_and_accepts_dashboard_prompts() {
     let client = dashboard_client(&fixture.token);
     let machine_id = machine_id_in(&fixture.paths.state_dir);
 
-    let mut dash = dashboard_socket(&fixture, "dashboard").await;
     let daemon_paths = fixture.paths.clone();
     let daemon_url = fixture.url();
     let daemon_token = fixture.token.clone();
@@ -194,20 +193,37 @@ async fn daemon_registers_and_accepts_dashboard_prompts() {
         .unwrap();
     assert_eq!(missing.status(), reqwest::StatusCode::NOT_FOUND);
 
-    // The prompt must have reached the daemon: it echoes it as a relay event.
+    // The prompt must have reached the daemon: it echoes it as a relay
+    // event on the dashboard SSE stream (machines no longer receive the
+    // broadcast — the dashboard channel is the only subscriber).
     let mut seen_prompt = false;
-    for _ in 0..80 {
-        let Ok(Some(Ok(Message::Text(text)))) =
-            tokio::time::timeout(Duration::from_millis(500), dash.next()).await
-        else {
-            continue;
+    let mut sse = client
+        .get(fixture.http(&format!(
+            "/events?session_id={}",
+            fixture.session_id
+        )))
+        .send()
+        .await
+        .unwrap();
+    'outer: for _ in 0..80 {
+        let chunk = match tokio::time::timeout(Duration::from_millis(500), sse.chunk()).await {
+            Ok(Ok(Some(chunk))) => chunk,
+            Ok(Ok(None)) => break,
+            _ => continue,
         };
-        let Some(RelayFrame::Event { event, .. }) = RelayFrame::from_json(text.as_str()) else {
-            continue;
-        };
-        if event["type"] == "relay.prompt" && event["text"] == "hello from the dashboard" {
-            seen_prompt = true;
-            break;
+        for line in String::from_utf8_lossy(&chunk).lines() {
+            let Some(data) = line.strip_prefix("data: ") else {
+                continue;
+            };
+            let Ok(frame) = serde_json::from_str::<Value>(data) else {
+                continue;
+            };
+            if frame["event"]["type"] == "relay.prompt"
+                && frame["event"]["text"] == "hello from the dashboard"
+            {
+                seen_prompt = true;
+                break 'outer;
+            }
         }
     }
     assert!(seen_prompt, "daemon never received the dashboard prompt");

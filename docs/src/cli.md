@@ -171,10 +171,14 @@ Print the another-harness rule set verbatim. See
 ## `freedas bench run`
 
 Run a benchmark suite. Flags: `--suite <path>` (required), `--repeat <n>`
-(default 1), `--router <mode>` (accepted, currently unused), `--model <ref>`,
-`--json`. Each task directory provides `task.yaml` with `id`, `prompt`,
-`repo`, `base_branch`, and `tests/` exit-code checks; the runner checks out
-the repo, runs the agent with `--auto`, and reports pass/fail plus a summary.
+(default 1), `--router static|learned|off`, `--model <ref>` (must be a
+catalog model), `--json`. Each task directory provides `task.yaml` with
+`id` (`[A-Za-z0-9_-]`), `prompt`, `repo` (a local path or `https://` remote),
+`base_branch`, and `tests/` exit-code checks; the runner checks out the repo,
+runs the agent with bypassed permissions, and reports pass/fail plus a
+summary. Task tests run under the OS sandbox; without a backend they fail
+closed unless `FREEDAS_BENCH_ALLOW_UNSANDBOXED=1`, and unverified passes do
+not count toward the summary.
 
 ## `freedas debug [what]`
 
@@ -217,17 +221,27 @@ Remove the binary, PATH line, and data/state/cache after confirmation.
 | `FREEDAS_DISABLE_PROJECT_CONFIG=1` | Skip project-layer config |
 | `FREEDAS_MODEL` | Override `model` for one run |
 | `FREEDAS_EXPERIMENTAL_SANDBOX=false` | Opt out of the OS sandbox |
+| `FREEDAS_CONFIG_ANCESTORS=1` | Also load config from every ancestor directory |
+| `FREEDAS_TRUST_PROJECT_CODE=1` | Trust project-sourced agents, skills, commands, plugins, and MCP for this repo |
+| `FREEDAS_BENCH_ALLOW_UNSANDBOXED=1` | Allow bench task tests to run without an OS sandbox (results are unverified) |
 | `FREEDAS_SANDBOX_ALLOW_ALL_READS=1` | macOS sandbox: allow all reads |
 | `FREEDAS_SERVER_TOKEN` / `FREEDAS_SERVER_PASSWORD` / `FREEDAS_SERVER_USERNAME` | Server auth |
+| `FREEDAS_SERVER_ALLOW_MISSING_HOST=1` | Accept loopback requests with no `Host` header |
 | `FREEDAS_CONTROL_URL` | Control-plane base URL for device login, workspaces, and the skill registry |
 | `FREEDAS_API_URL` | Control-plane fallback for the skill registry |
 | `FREEDAS_GATEWAY_URL` | `freedas` provider's gateway base URL (default `http://127.0.0.1:8081/v1`) |
+| `FREEDAS_GATEWAY_UPSTREAM` | Gateway's upstream OpenAI-compatible base (canonical; `FREEDAS_UPSTREAM_URL` is the deprecated alias) |
+| `FREEDAS_GATEWAY_INSECURE_NO_AUTH=1` | Gateway library mode: accept any bearer, no metering |
+| `FREEDAS_GITHUB_API_BASE` | GitHub API base for review diffs and the review worker (default `https://api.github.com`) |
 | `FREEDAS_RELAY_URL` / `FREEDAS_RELAY_TOKEN` | Relay WebSocket and token |
+| `RELAY_TOKEN` | Relay-server bearer token (required for non-loopback bind) |
+| `RELAY_MACHINE_TOKENS` / `RELAY_MACHINE_SCOPES` | Relay-server per-machine credentials and scope allowlists |
 | `FREEDAS_REGISTRY` | Skill registry override |
 | `FREEDAS_NPM_REGISTRY` | npm registry mirror for plugin install |
 | `FREEDAS_PLUGIN_TRUST=1` | Record a process plugin's hash (first load or after change) |
+| `FREEDAS_PLUGIN_TRUST_FILE` | Override the trusted-plugins hash file (CI/test isolation) |
 | `FREEDAS_RELEASE_BASE` | Release mirror for install/upgrade |
-| `FREEDAS_TEST_PROVIDER=fake` | Offline fake provider for tests |
+| `FREEDAS_TEST_PROVIDER=fake` | Offline fake provider for tests (debug builds only) |
 | `FREEDAS_TUI_TIMING=1` | Print TUI startup stage timings to stderr |
 | `FREEDAS_DUMP_REQUEST=1` | Fake provider: print system/message/tool byte sizes per request |
 | `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`/`GOOGLE_API_KEY`, `OPENROUTER_API_KEY`, `DEEPSEEK_API_KEY`, `OPENCODE_API_KEY` | Provider credentials |

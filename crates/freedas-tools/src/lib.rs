@@ -297,7 +297,9 @@ pub fn resolve_path(ctx: &ToolContext, input: &str) -> Result<PathBuf> {
 /// `edit`) may use it, never `bash`.
 pub(crate) fn resolve_path_as(ctx: &ToolContext, input: &str, action: &str) -> Result<PathBuf> {
     let canon = resolve_abs(&ctx.cwd, input)?;
-    if action == "edit" && has_git_component(&canon) {
+    // `.git` is denied for every tool action: writes would forge hooks (RCE
+    // on next commit) and reads leak remotes/credentials/object contents.
+    if has_git_component(&canon) {
         return Err(FreedasError::PermissionDenied {
             action: action.into(),
             resource: input.into(),
@@ -319,6 +321,7 @@ pub(crate) fn resolve_path_as(ctx: &ToolContext, input: &str, action: &str) -> R
             effect,
             ("external_directory".into(), resource),
             None,
+            false,
             false,
         )?;
     }
@@ -395,13 +398,15 @@ fn canonicalize_lenient(abs: &Path) -> PathBuf {
 }
 /// Re-verify an absolute path still lands inside the project after it was
 /// created or modified (symlink-swap detection for write and patch paths).
-pub(crate) fn reverify_abs(ctx: &ToolContext, abs: &Path) -> Result<()> {
+/// `display` is the user-supplied spelling reported on failure — never the
+/// canonical absolute path, which leaks the host layout to the model.
+pub(crate) fn reverify_abs(ctx: &ToolContext, abs: &Path, display: &str) -> Result<()> {
     let root = canonical_root(ctx);
     let canon = canonicalize_lenient(abs);
     if !canon.starts_with(&root) {
         return Err(FreedasError::PermissionDenied {
             action: "edit".into(),
-            resource: abs.to_string_lossy().to_string(),
+            resource: display.to_string(),
         });
     }
     Ok(())
@@ -467,6 +472,7 @@ fn finish(
     ask_for: (String, String),
     preview: Option<&str>,
     dynamic: bool,
+    nonbash_ask: bool,
 ) -> Result<()> {
     // The OS sandbox only bounds subprocess actions (bash and anything it
     // spawns), and only when it also denies the network; an `ask` for a fully
@@ -474,9 +480,13 @@ fn finish(
     // ask because the sandbox cannot vouch for what they will touch. The
     // upgrade applies only when a backend exists; otherwise the later
     // `wrap_command` fallback runs unsandboxed and the prompt must stand.
+    // `nonbash_ask` marks Asks raised by read/edit/external_directory
+    // sub-resources — the sandbox cannot vouch for what a command reads, so
+    // those asks survive the upgrade.
     let contained = ctx.sandbox
         && ctx.config.sandbox.network == "deny"
         && !dynamic
+        && !nonbash_ask
         && freedas_sandbox::available();
     let effect = if contained && ask_for.0 == "bash" && effect == Effect::Ask {
         Effect::Allow
@@ -552,7 +562,7 @@ pub(crate) fn check_perm_with_preview(
         &ctx.config,
         &rules_for(ctx),
     );
-    finish(ctx, effect, (action.to_string(), res), preview, false)
+    finish(ctx, effect, (action.to_string(), res), preview, false, false)
 }
 /// Check both the user-supplied spelling and the canonical absolute path, so a
 /// rule matching either form (`*.env`, an absolute allow, `..` tricks) still
@@ -580,6 +590,7 @@ pub(crate) fn check_perm_path(
             (action.to_string(), input.to_string()),
             preview,
             false,
+            false,
         );
     }
     let effect = combine(
@@ -595,6 +606,7 @@ pub(crate) fn check_perm_path(
         effect,
         (action.to_string(), input.to_string()),
         preview,
+        false,
         false,
     )
 }
@@ -617,7 +629,7 @@ pub fn check_perm_readonly(ctx: &ToolContext, action: &str, resource: Option<&st
     } else {
         Effect::Allow
     };
-    finish(ctx, effect, (action.to_string(), res), None, false)
+    finish(ctx, effect, (action.to_string(), res), None, false, false)
 }
 
 /// Cap speculative reads: at most this many files and this many bytes each.
@@ -1104,6 +1116,14 @@ impl Tool for Bash {
         for w in &scan.writes {
             for base in &cwds {
                 let abs = resolve_abs(base, w)?;
+                // Same hard-deny as write/edit/patch: a bash redirect into
+                // .git (hooks → RCE) must never degrade to a generic edit.
+                if has_git_component(&abs) {
+                    return Err(FreedasError::PermissionDenied {
+                        action: "edit".into(),
+                        resource: w.clone(),
+                    });
+                }
                 if abs.starts_with(&root) {
                     // Check both spellings: the raw input (e.g. `*.env`) and the
                     // canonical absolute path, so a rule matching either form
@@ -1138,6 +1158,12 @@ impl Tool for Bash {
             }
             for base in &cwds {
                 let abs = resolve_abs(base, target)?;
+                if has_git_component(&abs) {
+                    return Err(FreedasError::PermissionDenied {
+                        action: "read".into(),
+                        resource: target.clone(),
+                    });
+                }
                 if abs.starts_with(&root) {
                     resources.push(("read".into(), target.clone()));
                     let canon = abs.to_string_lossy().to_string();
@@ -1152,30 +1178,57 @@ impl Tool for Bash {
                 }
             }
         }
-        let mut effect = combine(&resources, &ctx.config, &rules_for(ctx));
+        let rules = rules_for(ctx);
+        let mut effect = combine(&resources, &ctx.config, &rules);
         // Dynamic constructs the scanner cannot resolve statically always ask
         // unless a rule already denied the command.
         let dynamic = scan.needs_ask || unresolved_reads;
         if dynamic && effect == Effect::Allow {
             effect = Effect::Ask;
         }
+        // The sandbox containment upgrade covers only the subprocess's own
+        // action; an Ask raised by a read/edit/external_directory operand is
+        // about host files the sandbox cannot vouch for and must survive.
+        let nonbash_ask = resources.iter().any(|(a, r)| {
+            a != "bash" && freedas_permission::resolve(&ctx.config, a, r, &rules) == Effect::Ask
+        });
         finish(
             ctx,
             effect,
             ("bash".into(), command.to_string()),
             None,
             dynamic,
+            nonbash_ask,
         )?;
         let timeout_ms = input
             .get("timeout_ms")
             .and_then(|v| v.as_u64())
             .unwrap_or(120_000);
-        let allow_all_reads = std::env::var("FREEDAS_SANDBOX_ALLOW_ALL_READS")
-            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-            .unwrap_or(false);
+        // The all-reads hatch is a debug escape and must never apply under
+        // `sandbox.mode = "on"`, which is the strict isolation contract.
+        let allow_all_reads = ctx.config.sandbox.mode != "on"
+            && std::env::var("FREEDAS_SANDBOX_ALLOW_ALL_READS")
+                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                .unwrap_or(false);
+        // Per-run scratch: keeps staged secrets and build artifacts out of
+        // the host-shared /tmp so other runs (sandboxed or not) cannot see
+        // them. Added as a write root so both backends grant access.
+        let private_tmp = {
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0);
+            let dir = std::env::temp_dir()
+                .join(format!("freedas-run-{}-{nanos:x}", std::process::id()));
+            std::fs::create_dir_all(&dir).ok().map(|()| dir)
+        };
+        let mut write_roots = vec![root.clone()];
+        if let Some(t) = &private_tmp {
+            write_roots.push(t.clone());
+        }
         let policy = freedas_sandbox::SandboxPolicy {
             read: vec![root.clone()],
-            write: vec![root.clone()],
+            write: write_roots,
             network: ctx.config.sandbox.network.clone(),
             env_allowlist: Vec::new(),
             timeout_ms,
@@ -1186,6 +1239,19 @@ impl Tool for Bash {
             || std::env::var("FREEDAS_EXPERIMENTAL_SANDBOX")
                 .map(|v| v == "false" || v == "0")
                 .unwrap_or(false);
+        let no_backend_err = |ctx: &ToolContext| -> FreedasError {
+            if ctx.config.sandbox.mode == "on" {
+                FreedasError::SandboxUnavailable(
+                    "sandbox.mode = \"on\" but no sandbox backend (sandbox-exec/bwrap) is installed".into(),
+                )
+            } else {
+                FreedasError::SandboxUnavailable(
+                    "no sandbox backend and no interactive approver; refusing unsandboxed exec \
+                     (set FREEDAS_EXPERIMENTAL_SANDBOX=false to opt out explicitly)"
+                        .into(),
+                )
+            }
+        };
         let direct = || {
             vec![
                 "/bin/bash".to_string(),
@@ -1196,8 +1262,14 @@ impl Tool for Bash {
         let wrapped = if sandbox_off {
             direct()
         } else {
+            // Single-check containment: the wrap result below is what actually
+            // runs, so a backend that vanishes between the permission check
+            // and spawn fails closed instead of silently running unsandboxed.
             match freedas_sandbox::wrap_command(&policy, "/bin/bash", &["-lc", command]) {
                 Some(wrapped) => wrapped,
+                None if ctx.config.sandbox.mode == "on" || ctx.approver.is_none() => {
+                    return Err(no_backend_err(ctx));
+                }
                 None => {
                     eprintln!(
                         "freedas: sandbox: no backend available; running bash without OS sandbox"
@@ -1221,6 +1293,9 @@ impl Tool for Bash {
             cmd.env(k, v);
         }
         cmd.env("TERM", "dumb").env("NO_COLOR", "1").env("CI", "1");
+        if let Some(t) = &private_tmp {
+            cmd.env("TMPDIR", t).env("TMP", t).env("TEMP", t);
+        }
         #[cfg(unix)]
         cmd.process_group(0);
         let mut child = cmd
@@ -1262,6 +1337,9 @@ impl Tool for Bash {
             };
         let stdout = String::from_utf8_lossy(&stdout_task.await.unwrap_or_default()).to_string();
         let stderr = String::from_utf8_lossy(&stderr_task.await.unwrap_or_default()).to_string();
+        if let Some(t) = &private_tmp {
+            let _ = std::fs::remove_dir_all(t);
+        }
         let (out, t1) = truncate_text(&stdout, 1024 * 1024);
         let (err, t2) = truncate_text(&stderr, 1024 * 1024);
         let mut content = String::new();
@@ -1906,7 +1984,7 @@ impl Tool for LspTool {
         let col = input["col"].as_u64().unwrap_or(1).saturating_sub(1) as u32;
         let (content, metadata) = match operation {
             "diagnostics" => {
-                let diags = freedas_lsp::diagnostics(server, &abs)
+                let diags = freedas_lsp::diagnostics(server, &abs, &ctx.project_root)
                     .await
                     .map_err(|e| FreedasError::Tool(format!("lsp diagnostics: {e}")))?;
                 let lines: Vec<String> = diags
@@ -1940,9 +2018,9 @@ impl Tool for LspTool {
             }
             "hover" | "definition" => {
                 let found = if operation == "hover" {
-                    freedas_lsp::hover(server, &abs, line, col).await
+                    freedas_lsp::hover(server, &abs, &ctx.project_root, line, col).await
                 } else {
-                    freedas_lsp::definition(server, &abs, line, col).await
+                    freedas_lsp::definition(server, &abs, &ctx.project_root, line, col).await
                 }
                 .map_err(|e| FreedasError::Tool(format!("lsp {operation}: {e}")))?;
                 let located = found.is_some();
@@ -1957,10 +2035,11 @@ impl Tool for LspTool {
                 )));
             }
         };
+        let (content, truncated) = truncate_text(&content, 20_000);
         Ok(ToolOutput {
             content,
             metadata,
-            truncated: false,
+            truncated,
         })
     }
 }

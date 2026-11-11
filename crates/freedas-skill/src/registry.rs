@@ -37,6 +37,44 @@ pub fn registry_base() -> String {
     format!("{}/registry", base.trim_end_matches('/'))
 }
 
+/// HTTPS everywhere except loopback HTTP for local dev registries. A cleartext
+/// remote registry could serve both the tarball and its `x-skill-sha256`
+/// header, making the integrity check self-referential.
+fn registry_endpoint_ok(url: &str) -> bool {
+    let Ok(u) = reqwest::Url::parse(url) else {
+        return false;
+    };
+    if u.scheme() == "https" {
+        return true;
+    }
+    u.scheme() == "http"
+        && u.host_str()
+            .map(|h| {
+                h == "localhost"
+                    || h == "[::1]"
+                    || h == "::1"
+                    || h == "127.0.0.1"
+                    || h.starts_with("127.")
+            })
+            .unwrap_or(false)
+}
+
+fn check_registry_endpoint() -> Result<String, String> {
+    let base = registry_base();
+    if !registry_endpoint_ok(&base) {
+        return Err(format!(
+            "registry endpoint {base} is not https (http allowed for loopback only)"
+        ));
+    }
+    Ok(base)
+}
+
+/// Hard caps for pulled packages: guards memory on the response body and
+/// disk on unpack.
+const MAX_PULL_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_PULL_ENTRIES: usize = 4096;
+const MAX_PULL_UNPACKED: u64 = 256 * 1024 * 1024;
+
 /// Package a skill directory into a gzipped tarball in memory.
 pub async fn package_skill(dir: &Path) -> Result<Vec<u8>, String> {
     tokio::task::spawn_blocking({
@@ -103,8 +141,9 @@ pub async fn push_skill(name: &str, dir: &Path, token: Option<&str>) -> Result<S
     let sha = sha256_hex(&bytes);
     let description = skill_description(dir);
     reject_crlf(&description, "skill description")?;
+    let base = check_registry_endpoint()?;
     let client = reqwest::Client::new();
-    let url = format!("{}/skills/{}", registry_base(), encode_skill_name(name));
+    let url = format!("{}/skills/{}", base, encode_skill_name(name));
     let mut req = client
         .post(&url)
         .header("content-type", "application/octet-stream")
@@ -153,8 +192,9 @@ pub async fn pull_skill(
     force: bool,
 ) -> Result<String, String> {
     reject_crlf(name, "skill name")?;
+    let base = check_registry_endpoint()?;
     let client = reqwest::Client::new();
-    let url = format!("{}/skills/{}", registry_base(), encode_skill_name(name));
+    let url = format!("{}/skills/{}", base, encode_skill_name(name));
     let mut req = client.get(&url);
     if let Some(token) = token {
         req = req.bearer_auth(token);
@@ -163,14 +203,37 @@ pub async fn pull_skill(
     if !resp.status().is_success() {
         return Err(format!("pull failed: {}", resp.status()));
     }
-    let expected = resp
-        .headers()
-        .get("x-skill-sha256")
-        .and_then(|v| v.to_str().ok())
-        .filter(|s| !s.is_empty())
-        .ok_or_else(|| "pull failed: missing integrity header".to_string())?
-        .to_string();
+    // An out-of-band pin beats the response header: the header is a
+    // corruption check only, since a compromised registry supplies both
+    // sides. `FREEDAS_SKILL_SHA256_<NAME>` (uppercased, non-alnum -> `_`)
+    // pins the expected digest from a trusted channel.
+    let pin_var = format!(
+        "FREEDAS_SKILL_SHA256_{}",
+        name.chars()
+            .map(|c| if c.is_ascii_alphanumeric() {
+                c.to_ascii_uppercase()
+            } else {
+                '_'
+            })
+            .collect::<String>()
+    );
+    let expected = match std::env::var(&pin_var).ok().filter(|s| !s.is_empty()) {
+        Some(pin) => pin,
+        None => resp
+            .headers()
+            .get("x-skill-sha256")
+            .and_then(|v| v.to_str().ok())
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| "pull failed: missing integrity header".to_string())?
+            .to_string(),
+    };
+    if resp.content_length().map(|n| n > MAX_PULL_BYTES).unwrap_or(false) {
+        return Err(format!("pull failed: package exceeds {MAX_PULL_BYTES} bytes"));
+    }
     let bytes = resp.bytes().await.map_err(|e| e.to_string())?;
+    if bytes.len() as u64 > MAX_PULL_BYTES {
+        return Err(format!("pull failed: package exceeds {MAX_PULL_BYTES} bytes"));
+    }
     if expected != sha256_hex(&bytes) {
         return Err("pull failed: integrity check failed".into());
     }
@@ -189,8 +252,20 @@ pub async fn pull_skill(
     let mut archive = tar::Archive::new(flate2::read::GzDecoder::new(std::io::Cursor::new(
         bytes.to_vec(),
     )));
+    let mut count = 0usize;
+    let mut unpacked: u64 = 0;
     for entry in archive.entries().map_err(|e| e.to_string())? {
         let mut entry = entry.map_err(|e| e.to_string())?;
+        count += 1;
+        if count > MAX_PULL_ENTRIES {
+            return Err(format!("pull failed: more than {MAX_PULL_ENTRIES} entries"));
+        }
+        unpacked = unpacked.saturating_add(entry.header().size().unwrap_or(0));
+        if unpacked > MAX_PULL_UNPACKED {
+            return Err(format!(
+                "pull failed: unpacked size exceeds {MAX_PULL_UNPACKED} bytes"
+            ));
+        }
         let kind = entry.header().entry_type();
         // Only regular files and directories; reject symlinks, hard links,
         // fifos, devices, and other special entries.

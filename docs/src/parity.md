@@ -42,7 +42,7 @@ means the product deliberately does not implement it.
 | Local web UI | `freedas web`: static SPA served by `freedas-server` | Partial: zero-build static app, not the Leptos WASM app; same JSON/SSE routes |
 | ACP | `freedas acp` over stdio: initialize, session new/load/prompt/cancel, set_mode/set_model | Implemented |
 | Stats | `freedas stats` + `/usage`: days, tools, models, project filters | Implemented |
-| Benchmark harness | `freedas bench run --suite` with repeat, `--model`, `--json` | Partial: `--router <mode>` is accepted but not yet applied; no adapter suites bundled |
+| Benchmark harness | `freedas bench run --suite` with repeat, `--router`, `--model`, `--json` | Implemented; no adapter suites bundled |
 | Standards gate | `freedas-standards`: detected or configured commands, fix loop via synthetic messages, `gate.passed`/`gate.failed` | Implemented |
 | Self-improvement | Skill learner (`auto-*` skills), router learned-quality stats | Implemented |
 | Native Windows | - | Not a target; WSL only |
@@ -52,5 +52,5 @@ means the product deliberately does not implement it.
 ## By area
 
 - **Complete:** session lifecycle, TUI, permissions, sandbox, headless, agents, skills, commands, memory, sync, worktrees, MCP, plugins, server API/SSE, ACP, relay, local reviews, standards gate, control plane core (auth, workspaces, wallet, budgets, teams, invoices, registry, reviews queue, sandboxes lifecycle, relay presence), gateway, review service, sandbox runners.
-- **Partial:** install packaging (no release pipeline yet), web UI rendering (static SPA), SSO/SCIM (untested against an IdP), payments (manual credits only), benchmark ablations (`--router` unused).
+- **Partial:** install packaging (no release pipeline yet), web UI rendering (static SPA), SSO/SCIM (untested against an IdP), payments (manual credits only).
 - **Not a target:** native Windows. **Not yet:** memory embeddings, OpenAI Responses API, remote catalog refresh.

@@ -11,7 +11,7 @@ FROM rust:1.89-bookworm AS build
 WORKDIR /src
 COPY Cargo.toml Cargo.lock CHANGELOG.md LICENSE NOTICE ./
 COPY crates ./crates
-RUN cargo build --release -p freedas \
+RUN cargo build --locked --release -p freedas \
     && strip target/release/freedas
 
 FROM debian:bookworm-slim

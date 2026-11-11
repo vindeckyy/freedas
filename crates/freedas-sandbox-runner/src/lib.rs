@@ -260,8 +260,16 @@ pub fn compute_seconds(started_ms: i64, finished_ms: i64) -> i64 {
 /// Compute cost for a run, billed per second at the rate snapshotted at creation,
 /// rounded to the ledger's six decimal places.
 pub fn compute_cost(seconds: i64, rate_usd_per_second: f64) -> f64 {
-    let cost = seconds.max(MIN_COMPUTE_SECONDS) as f64 * rate_usd_per_second;
-    (cost * 1e6).round() / 1e6
+    // A non-finite or negative row rate must not reach the ledger cast — NaN
+    // renders as 'NaN' and fails the row, negatives silently invert billing.
+    let rate = if rate_usd_per_second.is_finite() && rate_usd_per_second >= 0.0 {
+        rate_usd_per_second
+    } else {
+        0.0
+    };
+    let cost = seconds.max(MIN_COMPUTE_SECONDS) as f64 * rate;
+    let cost = (cost * 1e6).round() / 1e6;
+    if cost.is_finite() { cost } else { 0.0 }
 }
 
 /// Flatten, redact, and bound a failure reason so it fits the database column.
@@ -428,6 +436,20 @@ fn spawn_heartbeat(
     })
 }
 
+/// Row ids land in host paths and Docker/K8s object names; anything outside a
+/// DNS-label-ish charset can traverse `work_dir` or hijack sibling objects.
+pub fn check_sandbox_id(id: &str) -> Result<(), String> {
+    let ok = !id.is_empty()
+        && id.len() <= 64
+        && id.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'));
+    if ok {
+        Ok(())
+    } else {
+        Err(bounded_reason(&format!("invalid sandbox id: {id}")))
+    }
+}
+
 /// Run one leased sandbox to completion and settle its compute billing.
 pub async fn run_sandbox(
     pool: &PgPool,
@@ -436,6 +458,10 @@ pub async fn run_sandbox(
     cfg: &RunnerConfig,
     cancel: &CancellationToken,
 ) -> Result<Billing, String> {
+    check_sandbox_id(&sandbox.id)?;
+    if !sandbox.compute_rate_usd.is_finite() || sandbox.compute_rate_usd < 0.0 {
+        return Err("invalid compute rate".to_string());
+    }
     let started = now_ms();
     let run_cancel = cancel.child_token();
     let tokens = fetch_tokens(cfg, &sandbox.id).await;
@@ -1221,14 +1247,23 @@ async fn docker_run(
     }
     .await;
 
-    let _ = docker_stop(client, &name).await;
-    let _ = client
+    // Teardown failures leave a token-bearing container or a host workspace
+    // behind — log them with the sandbox id so operators can reconcile.
+    if let Err(error) = docker_stop(client, &name).await {
+        tracing::warn!(sandbox = %sandbox.id, %error, "docker stop failed during teardown");
+    }
+    if let Err(error) = client
         .remove_container(
             &name,
             Some(RemoveContainerOptionsBuilder::default().force(true).build()),
         )
-        .await;
-    let _ = tokio::fs::remove_dir_all(&workspace).await;
+        .await
+    {
+        tracing::warn!(sandbox = %sandbox.id, %error, "docker remove failed during teardown");
+    }
+    if let Err(error) = tokio::fs::remove_dir_all(&workspace).await {
+        tracing::warn!(sandbox = %sandbox.id, %error, "workspace cleanup failed");
+    }
     match run {
         Ok(branch) => Ok(draft_pr(cfg, sandbox, &branch, git_token).await),
         Err(error) => Err(error),
@@ -1291,6 +1326,9 @@ pub fn k8s_job_manifest(
                     "containers": [{
                         "name": "agent",
                         "image": image,
+                        // Mutable tags re-resolve on every run; prefer a
+                        // digest-pinned image in --image for deploys.
+                        "imagePullPolicy": "Always",
                         "args": args,
                         "env": env,
                         "securityContext": {
@@ -1298,15 +1336,15 @@ pub fn k8s_job_manifest(
                             "capabilities": { "drop": ["ALL"] },
                             "readOnlyRootFilesystem": true
                         },
-                        "resources": { "limits": { "cpu": "2", "memory": "4Gi" } },
+                        "resources": { "limits": { "cpu": "2", "memory": "4Gi", "ephemeral-storage": "1Gi" } },
                         "volumeMounts": [
                             { "name": "workspace", "mountPath": "/workspace" },
                             { "name": "tmp", "mountPath": "/tmp" }
                         ]
                     }],
                     "volumes": [
-                        { "name": "workspace", "emptyDir": {} },
-                        { "name": "tmp", "emptyDir": {} }
+                        { "name": "workspace", "emptyDir": { "sizeLimit": "512Mi" } },
+                        { "name": "tmp", "emptyDir": { "sizeLimit": "128Mi" } }
                     ]
                 }
             }
@@ -1379,7 +1417,12 @@ pub fn k8s_network_policy_manifest(id: &str, namespace: &str) -> serde_json::Val
             "policyTypes": ["Egress"],
             "egress": [
                 { "ports": [{ "protocol": "UDP", "port": 53 }, { "protocol": "TCP", "port": 53 }] },
-                { "ports": [{ "protocol": "TCP", "port": 443 }] }
+                { "ports": [{ "protocol": "TCP", "port": 443 }],
+                  "to": [{ "ipBlock": { "cidr": "0.0.0.0/0", "except": [
+                      "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16",
+                      "127.0.0.0/8", "169.254.0.0/16", "100.64.0.0/10",
+                      "192.0.0.0/24", "198.18.0.0/15", "224.0.0.0/4"
+                  ] } }] }
             ]
         }
     })
@@ -1546,16 +1589,25 @@ pub async fn k8s_run(
     }
     .await;
 
-    let _ = api.delete(&name, &DeleteParams::default()).await;
-    let _ = k8s_secret_api(client, &cfg.namespace)
+    if let Err(error) = api.delete(&name, &DeleteParams::default()).await {
+        tracing::warn!(sandbox = %sandbox.id, %error, "job delete failed during teardown");
+    }
+    if let Err(error) = k8s_secret_api(client, &cfg.namespace)
         .delete(&k8s_secret_name(&sandbox.id), &DeleteParams::default())
-        .await;
-    let _ = k8s_network_policy_api(client, &cfg.namespace)
+        .await
+    {
+        // An orphaned Secret holds short-lived model/GitHub tokens.
+        tracing::warn!(sandbox = %sandbox.id, %error, "secret delete failed during teardown");
+    }
+    if let Err(error) = k8s_network_policy_api(client, &cfg.namespace)
         .delete(
             &k8s_network_policy_name(&sandbox.id),
             &DeleteParams::default(),
         )
-        .await;
+        .await
+    {
+        tracing::warn!(sandbox = %sandbox.id, %error, "networkpolicy delete failed during teardown");
+    }
     match run {
         // The Job image pushes the branch itself (§26.3); open the draft PR here.
         Ok(()) => {
@@ -1655,7 +1707,10 @@ mod tests {
         assert_eq!(c["volumeMounts"][1]["mountPath"], "/tmp");
 
         assert_eq!(pod["volumes"][0]["name"], "workspace");
-        assert_eq!(pod["volumes"][0]["emptyDir"], serde_json::json!({}));
+        assert_eq!(
+            pod["volumes"][0]["emptyDir"],
+            serde_json::json!({ "sizeLimit": "512Mi" })
+        );
         assert_eq!(pod["volumes"][1]["name"], "tmp");
         // No service account token anywhere (K8s would inject the token at automount).
         let rendered = m.to_string();

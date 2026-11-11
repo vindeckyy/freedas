@@ -39,7 +39,8 @@ pub struct ReviewResult {
 
 /// Verify a GitHub `X-Hub-Signature-256` header (`sha256=<hex>`) in constant time.
 /// An empty secret never verifies: HMAC accepts an empty key, which would let a
-/// forged signature pass.
+/// forged signature pass. Callers must enforce one-time delivery IDs —
+/// GitHub signs no timestamp, so a valid signature alone permits replay.
 pub fn verify_webhook(body: &[u8], signature_header: &str, secret: &str) -> bool {
     if secret.is_empty() {
         return false;
@@ -667,7 +668,12 @@ async fn uncommitted_diff(root: &Path) -> Result<String, String> {
         Err(_) => git_out(root, &["diff", "--no-color"]).await?,
     };
     if let Ok(list) = git_out(root, &["ls-files", "--others", "--exclude-standard"]).await {
-        for file in list.lines().map(str::trim).filter(|l| !l.is_empty()) {
+        for file in list
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .take(200)
+        {
             let Some(bytes) = read_untracked(&root.join(file)).await else {
                 continue;
             };
@@ -778,6 +784,21 @@ fn pr_number(target: &str) -> Option<u64> {
     path.rsplit('/').next()?.parse().ok()
 }
 
+/// GitHub API base for diff fetches: the configured base, never a hardcoded
+/// host — the installation token must not leave for the wrong audience.
+fn diff_api_base() -> String {
+    std::env::var("FREEDAS_GITHUB_API_BASE")
+        .ok()
+        .filter(|base| !base.trim().is_empty())
+        .unwrap_or_else(|| github::DEFAULT_API_BASE.to_owned())
+}
+
+/// `head_sha` values land in API paths and `commit_id` fields; only real
+/// object ids pass (SHA-1 or SHA-256 hex).
+fn valid_head_sha(sha: &str) -> bool {
+    matches!(sha.len(), 40 | 64) && sha.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
 /// Prefer the diff at `pin` so a review posts against the commit it was run on;
 /// fall back to the PR's current head when that commit cannot be fetched.
 async fn pr_diff(
@@ -786,10 +807,13 @@ async fn pr_diff(
     pin: Option<&str>,
     token: Option<&str>,
 ) -> Result<String, String> {
-    if let Some(head_sha) = pin
-        && let Ok(diff) = pinned_pr_diff(root, number, head_sha, token).await
-    {
-        return Ok(diff);
+    if let Some(head_sha) = pin {
+        // A pinned review must never silently describe the floating head —
+        // the verdict posts against `head_sha` either way.
+        if !valid_head_sha(head_sha) {
+            return Err(format!("pinned head_sha {head_sha:?} is not a git object id"));
+        }
+        return pinned_pr_diff(root, number, head_sha, token).await;
     }
     let gh = tokio::process::Command::new("gh")
         .args(["pr", "diff", &number.to_string()])
@@ -812,6 +836,7 @@ async fn pinned_pr_diff(
     head_sha: &str,
     token: Option<&str>,
 ) -> Result<String, String> {
+    let api_base = diff_api_base();
     let token = match token {
         Some(token) => token.to_owned(),
         None => github_token(root)?,
@@ -821,7 +846,7 @@ async fn pinned_pr_diff(
     let client = reqwest::Client::new();
     let pull: serde_json::Value = client
         .get(format!(
-            "https://api.github.com/repos/{repo}/pulls/{number}"
+            "{api_base}/repos/{repo}/pulls/{number}"
         ))
         .header("Accept", "application/vnd.github+json")
         .header("User-Agent", "freedas")
@@ -838,7 +863,7 @@ async fn pinned_pr_diff(
         .ok_or("github: pull request has no base sha")?;
     let response = client
         .get(format!(
-            "https://api.github.com/repos/{repo}/compare/{base}...{head_sha}"
+            "{api_base}/repos/{repo}/compare/{base}...{head_sha}"
         ))
         .header("Accept", "application/vnd.github.v3.diff")
         .header("User-Agent", "freedas")
@@ -864,12 +889,13 @@ fn github_token(root: &Path) -> Result<String, String> {
 /// Fallback when `gh` is missing or unauthenticated: fetch the diff with the
 /// stored GitHub token.
 async fn github_pr_diff(root: &Path, number: u64) -> Result<String, String> {
+    let api_base = diff_api_base();
     let token = github_token(root)?;
     let remote = git_out(root, &["remote", "get-url", "origin"]).await?;
     let repo = github_repo(&remote).ok_or_else(|| format!("not a GitHub remote: {remote}"))?;
     let response = reqwest::Client::new()
         .get(format!(
-            "https://api.github.com/repos/{repo}/pulls/{number}"
+            "{api_base}/repos/{repo}/pulls/{number}"
         ))
         .header("Accept", "application/vnd.github.v3.diff")
         .header("User-Agent", "freedas")
@@ -1165,6 +1191,13 @@ async fn process(
     head_sha: Option<String>,
 ) {
     let repo = repo.unwrap_or_default();
+    // A queued head_sha must be a real object id before it reaches API paths;
+    // a malformed row fails closed rather than reviewing unpinned.
+    if let Some(sha) = head_sha.as_deref()
+        && !valid_head_sha(sha)
+    {
+        return record_failure(pool, &id, "malformed head_sha", false).await;
+    }
     let policy = policy_of(pool, &id).await;
     // Manual reviews (installation 0) still post through the installation that
     // owns the repository.
@@ -1276,7 +1309,7 @@ async fn post_to_github(
         repo,
         pr,
         head_sha,
-        &result.summary,
+        &freedas_core::redact::redact(&result.summary),
         &result.findings,
     )
     .await?;
@@ -1307,7 +1340,7 @@ async fn post_to_github(
         repo,
         head_sha,
         conclusion,
-        &result.summary,
+        &freedas_core::redact::redact(&result.summary),
     )
     .await
     {
@@ -1324,7 +1357,12 @@ async fn post_to_github(
         Err(error) => errors.push(error),
     }
     let policy = policy_of(pool, id).await;
-    if should_approve(&policy, result.confidence, result.risk)
+    let clean = !result
+        .findings
+        .iter()
+        .any(|f| matches!(f.severity.as_str(), "blocker" | "high"));
+    if clean
+        && should_approve(&policy, result.confidence, result.risk)
         && let Err(error) = submit_approval(
             &client,
             &app.api_base,

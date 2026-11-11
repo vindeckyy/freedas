@@ -143,6 +143,15 @@ pub async fn installation_token(
             api_base,
             &format!("/app/installations/{installation_id}/access_tokens"),
         ))
+        // Least privilege: review reads the diff, posts reviews/comments and
+        // check runs — nothing else.
+        .json(&serde_json::json!({
+            "permissions": {
+                "contents": "read",
+                "pull_requests": "write",
+                "checks": "write"
+            }
+        }))
         .bearer_auth(&jwt)
         .header("accept", "application/vnd.github+json")
         .header("user-agent", "freedas")
@@ -329,14 +338,22 @@ pub fn should_approve(policy: &ReviewPolicy, confidence: f32, risk: f32) -> bool
     let Some(auto) = &policy.auto_approve else {
         return false;
     };
-    confidence >= auto.min_confidence.unwrap_or(0.0) && risk <= auto.max_risk.unwrap_or(f32::MAX)
+    // Both thresholds must be explicit: a partial policy is never an approve.
+    let (Some(min), Some(max)) = (auto.min_confidence, auto.max_risk) else {
+        return false;
+    };
+    confidence >= min && risk <= max
 }
 
 /// `**severity** title`, body, then the suggestion when the model gave one.
 pub fn finding_body(finding: &Finding) -> String {
+    // Model text can quote secrets out of the diff or file context; scrub
+    // before it lands on the PR.
     let mut body = format!(
         "**{}** {}\n\n{}",
-        finding.severity, finding.title, finding.body
+        finding.severity,
+        freedas_core::redact::redact(&finding.title),
+        freedas_core::redact::redact(&finding.body)
     );
     if let Some(suggestion) = finding
         .suggestion
@@ -344,7 +361,7 @@ pub fn finding_body(finding: &Finding) -> String {
         .filter(|s| !s.trim().is_empty())
     {
         body.push_str("\n\n");
-        body.push_str(suggestion);
+        body.push_str(&freedas_core::redact::redact(suggestion));
     }
     body
 }
@@ -689,18 +706,19 @@ Z3K+yOKEmeE6F2oajJNW551v
         assert!(!should_approve(&policy, 3.9, 1.0));
         assert!(!should_approve(&policy, 5.0, 2.1));
 
+        // Partial thresholds never approve.
         policy.auto_approve = Some(AutoApprove {
             min_confidence: Some(4.0),
             max_risk: None,
         });
-        assert!(should_approve(&policy, 4.0, 5.0));
+        assert!(!should_approve(&policy, 4.0, 5.0));
         assert!(!should_approve(&policy, 3.0, 1.0));
 
         policy.auto_approve = Some(AutoApprove {
             min_confidence: None,
             max_risk: Some(1.0),
         });
-        assert!(should_approve(&policy, 0.0, 1.0));
+        assert!(!should_approve(&policy, 0.0, 1.0));
         assert!(!should_approve(&policy, 5.0, 1.5));
     }
 

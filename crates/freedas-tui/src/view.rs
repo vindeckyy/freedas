@@ -482,28 +482,53 @@ pub(crate) fn draw_permission(
         .into_iter()
         .map(Line::from)
         .collect::<Vec<_>>();
+    let preview_row = |row: &str| {
+        let s = if row.starts_with("@@") {
+            style::dim()
+        } else if row.starts_with('+') {
+            style::success()
+        } else if row.starts_with('-') {
+            style::error()
+        } else {
+            Style::default()
+        };
+        Line::styled(row.to_string(), s)
+    };
     match preview {
         Some(preview) => {
             let rows: Vec<&str> = preview.lines().collect();
             lines.push(Line::raw(""));
             lines.push(Line::styled("Preview", style::accent()));
-            for row in rows.iter().take(12) {
-                let s = if row.starts_with("@@") {
-                    style::dim()
-                } else if row.starts_with('+') {
-                    style::success()
-                } else if row.starts_with('-') {
-                    style::error()
-                } else {
-                    Style::default()
-                };
-                lines.push(Line::styled((*row).to_string(), s));
-            }
-            if rows.len() > 12 {
+            // Head + tail: a destructive line hidden past the fold must not
+            // be approvable sight-unseen.
+            const HEAD: usize = 6;
+            const TAIL: usize = 5;
+            if rows.len() <= HEAD + TAIL + 1 {
+                for row in &rows {
+                    lines.push(preview_row(row));
+                }
+            } else {
+                for row in &rows[..HEAD] {
+                    lines.push(preview_row(row));
+                }
+                let hidden = rows.len() - HEAD - TAIL;
+                let warn = rows[HEAD..rows.len() - TAIL]
+                    .iter()
+                    .any(|r| r.starts_with('-'));
                 lines.push(Line::styled(
-                    format!("… +{}", rows.len() - 12),
-                    style::dim(),
+                    format!(
+                        "… {hidden} hidden line(s){} …",
+                        if warn {
+                            " — includes deletions"
+                        } else {
+                            ""
+                        }
+                    ),
+                    style::warning(),
                 ));
+                for row in &rows[rows.len() - TAIL..] {
+                    lines.push(preview_row(row));
+                }
             }
         }
         None if action == "bash" => {
@@ -515,26 +540,63 @@ pub(crate) fn draw_permission(
         }
         None => {}
     }
+    // Consent bar stays pinned at the bottom of the dialog; the content
+    // above it scrolls if the terminal is short.
     lines.push(Line::raw(""));
-    lines.push(Line::from(vec![
-        Span::styled("[a] Allow once", style::success()),
-        Span::raw("   "),
-        Span::styled("[A] Always", style::success()),
-        Span::raw("   "),
-        Span::styled("[d] Deny", style::error()),
-    ]));
-    lines.push(Line::styled(
-        "1 = allow once · 2 = always · 3 = deny · Esc = deny",
-        style::dim(),
-    ));
-
-    let height = (lines.len() as u16).saturating_add(2).min(area.height);
+    let consent: Vec<Line> = vec![
+        Line::from(vec![
+            Span::styled("[a] Allow once", style::success()),
+            Span::raw("   "),
+            Span::styled("[A] Always", style::success()),
+            Span::raw("   "),
+            Span::styled("[d] Deny", style::error()),
+        ]),
+        Line::styled(
+            "1 = allow once · 2 = always · 3 = deny · Esc = deny",
+            style::dim(),
+        ),
+        Line::styled(
+            "always = saves this exact rule to your global config; edit config to revoke",
+            style::dim(),
+        ),
+    ];
+    let consent_h = consent.len() as u16;
+    let height = (lines.len() as u16 + consent_h)
+        .saturating_add(3)
+        .min(area.height);
     let rect = centered(area, width, height);
     let block = overlay_block("Permission");
     let inner = block.inner(rect);
+    // Clip content from the top if it overflows so the consent bar is never
+    // clipped away.
+    let content_area = Rect {
+        height: inner.height.saturating_sub(consent_h + 1),
+        ..inner
+    };
+    let consent_area = Rect {
+        y: inner.y + inner.height.saturating_sub(consent_h),
+        height: consent_h,
+        ..inner
+    };
+    let content_len = lines.len();
+    let content_area_rows = content_area.height as usize;
+    let skip = content_len.saturating_sub(content_area_rows);
+    let visible: Vec<Line> = lines.into_iter().skip(skip).collect();
+    if skip > 0 && !visible.is_empty() {
+        f.render_widget(
+            Paragraph::new(
+                std::iter::once(Line::styled(format!("… {skip} line(s) above"), style::dim()))
+                    .chain(visible.into_iter().skip(1))
+                    .collect::<Vec<_>>(),
+            ),
+            content_area,
+        );
+    } else {
+        f.render_widget(Paragraph::new(visible), content_area);
+    }
     f.render_widget(Clear, rect);
     f.render_widget(block, rect);
-    f.render_widget(Paragraph::new(lines), inner);
+    f.render_widget(Paragraph::new(consent), consent_area);
 }
 
 /// Scrollable `/help` panel: grouped commands and every custom command/skill.

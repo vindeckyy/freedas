@@ -2,7 +2,10 @@
 
 Every `/command` available inside a Freedas session. Custom commands, skills,
 and MCP prompts register in the same namespace after these; a name that
-collides with a built-in never registers.
+collides with a built-in never registers. Commands defined under the project
+root (`.freedas/commands/`) load only when the project layer is trusted — the
+same `trust_project_code` gate as project agents — and `agent`/`model`
+frontmatter fields in a project command are validated, not blindly honored.
 
 ## Session
 

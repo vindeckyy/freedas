@@ -116,6 +116,9 @@ async fn upload_skill(
 ) -> ApiResult {
     let auth = authenticate(&s.pool, &headers).await?;
     let workspace = current_workspace(&s, &auth).await?;
+    // Every member's pulls consume this registry; writes are admin-only.
+    let role = role_in(&s.pool, &workspace, auth.user_id.as_deref()).await?;
+    require_admin(role.as_deref())?;
     let description = headers
         .get("x-skill-description")
         .and_then(|v| v.to_str().ok())
@@ -377,6 +380,10 @@ struct Auth {
     workspace_id: Option<String>,
 }
 
+/// Human workspace tokens expire after 30 days — an immortal bearer survives
+/// every membership change until manual revoke, so mints carry `expires_at`.
+const TOKEN_TTL_MS: i64 = 30 * 24 * 3_600_000;
+
 async fn authenticate(pool: &PgPool, headers: &HeaderMap) -> Result<Auth, ApiError> {
     let token =
         bearer(headers).ok_or_else(|| fail(StatusCode::UNAUTHORIZED, "missing bearer token"))?;
@@ -399,6 +406,18 @@ async fn authenticate(pool: &PgPool, headers: &HeaderMap) -> Result<Auth, ApiErr
 
 async fn current_workspace(state: &AppState, auth: &Auth) -> Result<String, ApiError> {
     if let Some(id) = &auth.workspace_id {
+        // A user token's binding is only as fresh as the last membership
+        // check — a missed revoke must not leave a working credential.
+        if auth.user_id.is_some()
+            && role_in(&state.pool, id, auth.user_id.as_deref())
+                .await?
+                .is_none()
+        {
+            return Err(fail(
+                StatusCode::FORBIDDEN,
+                "not a member of this workspace",
+            ));
+        }
         return Ok(id.clone());
     }
     let Some(user_id) = &auth.user_id else {
@@ -569,13 +588,14 @@ async fn login(State(state): State<AppState>, Json(body): Json<LoginBody>) -> Ap
 
     let token = random_hex(32);
     sqlx::query(
-        "INSERT INTO api_tokens (id, user_id, workspace_id, token_hash, scopes, created_at)
-         VALUES ($1, $2, $3, $4, '{}', $5)",
+        "INSERT INTO api_tokens (id, user_id, workspace_id, token_hash, scopes, expires_at, created_at)
+         VALUES ($1, $2, $3, $4, '{}', $5, $6)",
     )
     .bind(new_id("tok"))
     .bind(&user_id)
     .bind(&workspace_id)
     .bind(hash_token(&token))
+    .bind(now_ms() + TOKEN_TTL_MS)
     .bind(now_ms())
     .execute(&state.pool)
     .await
@@ -674,12 +694,13 @@ async fn register(State(state): State<AppState>, Json(body): Json<LoginBody>) ->
         .await
         .map_err(internal)?;
     sqlx::query(
-        "INSERT INTO api_tokens (id, user_id, workspace_id, token_hash, scopes, created_at) VALUES ($1,$2,$3,$4,'{}',$5)",
+        "INSERT INTO api_tokens (id, user_id, workspace_id, token_hash, scopes, expires_at, created_at) VALUES ($1,$2,$3,$4,'{}',$5,$6)",
     )
     .bind(new_id("tok"))
     .bind(&user_id)
     .bind(&workspace_id)
     .bind(hash_token(&token))
+    .bind(now_ms() + TOKEN_TTL_MS)
     .bind(now_ms())
     .execute(&mut *tx)
     .await
@@ -900,13 +921,14 @@ async fn create_token(
     let plaintext = random_hex(32);
     let id = new_id("tok");
     sqlx::query(
-        "INSERT INTO api_tokens (id, user_id, workspace_id, token_hash, scopes, created_at)
-         VALUES ($1, $2, $3, $4, '{}', $5)",
+        "INSERT INTO api_tokens (id, user_id, workspace_id, token_hash, scopes, expires_at, created_at)
+         VALUES ($1, $2, $3, $4, '{}', $5, $6)",
     )
     .bind(&id)
     .bind(&auth.user_id)
     .bind(&workspace_id)
     .bind(hash_token(&plaintext))
+    .bind(now_ms() + TOKEN_TTL_MS)
     .bind(now_ms())
     .execute(&state.pool)
     .await
@@ -2122,6 +2144,25 @@ async fn create_sandbox(
             StatusCode::PAYMENT_REQUIRED,
             "wallet does not cover the sandbox minimum",
         ));
+    }
+    // Workspace budgets are spend gates: refuse when the minimum slice would
+    // push recorded spend past any configured limit.
+    let budgets = sqlx::query_as::<_, (String, f64)>(
+        "SELECT period, limit_usd::float8 FROM budgets
+         WHERE workspace_id = $1 AND scope = 'workspace'",
+    )
+    .bind(&workspace_id)
+    .fetch_all(&mut *tx)
+    .await
+    .map_err(internal)?;
+    for (period, limit) in budgets {
+        let spent = budget_spend(&state.pool, &workspace_id, "workspace", None, &period).await?;
+        if spent + minimum > limit + 1e-9 {
+            return Err(fail(
+                StatusCode::PAYMENT_REQUIRED,
+                "workspace budget would be exceeded by this sandbox",
+            ));
+        }
     }
     if minimum > 0.0 {
         sqlx::query(
@@ -4056,13 +4097,14 @@ async fn oidc_callback(State(state): State<AppState>, Query(query): Query<OidcQu
     let workspace_id = sole_workspace(&state.pool, &user_id).await?;
     let plaintext = random_hex(32);
     sqlx::query(
-        "INSERT INTO api_tokens (id, user_id, workspace_id, token_hash, scopes, created_at)
-         VALUES ($1, $2, $3, $4, '{}', $5)",
+        "INSERT INTO api_tokens (id, user_id, workspace_id, token_hash, scopes, expires_at, created_at)
+         VALUES ($1, $2, $3, $4, '{}', $5, $6)",
     )
     .bind(new_id("tok"))
     .bind(&user_id)
     .bind(&workspace_id)
     .bind(hash_token(&plaintext))
+    .bind(now_ms() + TOKEN_TTL_MS)
     .bind(now_ms())
     .execute(&state.pool)
     .await
@@ -4754,13 +4796,14 @@ async fn device_token(
     let token = random_hex(32);
     let mut tx = state.pool.begin().await.map_err(internal)?;
     sqlx::query(
-        "INSERT INTO api_tokens (id, user_id, workspace_id, token_hash, scopes, created_at)
-         VALUES ($1, $2, $3, $4, '{}', $5)",
+        "INSERT INTO api_tokens (id, user_id, workspace_id, token_hash, scopes, expires_at, created_at)
+         VALUES ($1, $2, $3, $4, '{}', $5, $6)",
     )
     .bind(new_id("tok"))
     .bind(&user_id)
     .bind(&workspace_id)
     .bind(hash_token(&token))
+    .bind(now + TOKEN_TTL_MS)
     .bind(now)
     .execute(&mut *tx)
     .await

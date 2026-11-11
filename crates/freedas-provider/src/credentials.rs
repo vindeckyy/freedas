@@ -139,6 +139,12 @@ pub async fn refresh_stored(data_dir: &Path, provider: &str) -> Option<String> {
     let url = all
         .get(&format!("{provider}-token-url"))
         .filter(|url| !url.is_empty())?;
+    if !crate::endpoint_url_ok(url) {
+        eprintln!(
+            "warning: stored token URL for {provider} is not https/loopback; skipping refresh"
+        );
+        return None;
+    }
     let resp = crate::http_client()
         .post(url)
         .form(&[
@@ -268,6 +274,10 @@ fn effective_control_base(explicit: &str, data_dir: &Path) -> String {
         if let Ok(url) = std::env::var(var) {
             let url = url.trim().to_string();
             if !url.is_empty() {
+                if !crate::endpoint_url_ok(&url) {
+                    eprintln!("warning: {var} is not https/loopback; ignoring");
+                    continue;
+                }
                 if !explicit.trim().is_empty() && explicit.trim() != url {
                     eprintln!("warning: {var} overrides configured control URL");
                 }
@@ -277,7 +287,10 @@ fn effective_control_base(explicit: &str, data_dir: &Path) -> String {
     }
     let trimmed = explicit.trim();
     if !trimmed.is_empty() {
-        return trimmed.to_string();
+        if crate::endpoint_url_ok(trimmed) {
+            return trimmed.to_string();
+        }
+        eprintln!("warning: configured control URL is not https/loopback; using default");
     }
     control_base(data_dir)
 }
@@ -420,7 +433,10 @@ pub fn control_base(data_dir: &Path) -> String {
         if let Ok(url) = std::env::var(var) {
             let trimmed = url.trim();
             if !trimmed.is_empty() {
-                return trimmed.to_string();
+                if crate::endpoint_url_ok(trimmed) {
+                    return trimmed.to_string();
+                }
+                eprintln!("warning: {var} is not https/loopback; ignoring");
             }
         }
     }
@@ -429,7 +445,10 @@ pub fn control_base(data_dir: &Path) -> String {
             if let Some(url) = all.get("control_url")
                 && !url.is_empty()
             {
-                return url.clone();
+                if crate::endpoint_url_ok(url) {
+                    return url.clone();
+                }
+                eprintln!("warning: stored control_url is not https/loopback; using default");
             }
         }
         Err(e) => {

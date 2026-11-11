@@ -57,8 +57,8 @@ defaults, so the built-ins still apply to things you did not mention.
 
 | Mode | Behavior |
 |---|---|
-| `bypass` (default) | Asks are approved automatically; deny rules still block |
-| `auto` | Asks prompt (headless: auto-rejected) |
+| `auto` (default) | Asks prompt (headless: auto-rejected) |
+| `bypass` | Asks are approved automatically; deny rules still block |
 | `ask` | Everything asks, even actions an allow rule would permit |
 
 `--auto` forces `bypass`, `--manual` forces `ask`, for one session or run; the

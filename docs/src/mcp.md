@@ -39,6 +39,10 @@ freedas mcp add local -- npx -y @acme/mcp-server
 ```
 
 Both forms write the `mcp` map into the project `.freedas/freedas.json`.
+Project-layer `mcp` entries only connect when the project is trusted
+(`trust_project_code`); a repo cannot make your client spawn or dial a
+server just by carrying a config file. Remote server URLs are also checked
+against loopback, private, link-local, and metadata addresses.
 
 ## Manage
 

@@ -10,6 +10,7 @@ impl Db {
         message_id: &str,
         commit_sha: &str,
     ) -> Result<String> {
+        super::check_commit_sha(commit_sha)?;
         let id = format!("snp_{}", ulid::Ulid::new());
         let now = freedas_core::paths::now_ms();
         self.lock().execute(

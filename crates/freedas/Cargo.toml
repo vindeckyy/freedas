@@ -45,3 +45,4 @@ tracing-subscriber.workspace = true
 ulid.workspace = true
 reqwest.workspace = true
 futures.workspace = true
+rpassword = "7.5.5"

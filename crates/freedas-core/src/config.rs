@@ -10,8 +10,10 @@ use crate::paths::Paths;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize, Default)]
 #[serde(rename_all = "kebab-case")]
 pub enum PermissionMode {
-    #[default]
     Bypass,
+    /// Default: rules decide, asks still prompt (auto-reject headless). A
+    /// missing config must not silently auto-approve every tool call.
+    #[default]
     Auto,
     Ask,
 }
@@ -96,7 +98,7 @@ impl Default for Config {
             model: Some("freedas/auto".into()),
             small_model: Some("freedas/auto-cheap".into()),
             variant: None,
-            permission_mode: PermissionMode::Bypass,
+            permission_mode: PermissionMode::Auto,
             default_agent: "build".into(),
             subagent_depth: 1,
             disabled_providers: Vec::new(),
@@ -457,10 +459,27 @@ impl Default for WebSearchConfig {
     }
 }
 
-fn load_into(cand: &Path, merged: &mut serde_json::Value) -> Result<(), FreedasError> {
+/// Which precedence layer a config file belongs to. Project-layer files are
+/// repo-controlled, so executable/security-sensitive keys in them get extra
+/// checks; system and global layers belong to the user.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Layer {
+    System,
+    Global,
+    Org,
+    Project,
+}
+
+fn load_into(
+    cand: &Path,
+    merged: &mut serde_json::Value,
+    layer: Layer,
+    project_trusted: bool,
+) -> Result<(), FreedasError> {
     if !cand.exists() {
         return Ok(());
     }
+    warn_permissive_config(cand, layer);
     let text = std::fs::read_to_string(cand)
         .map_err(|e| FreedasError::Config(format!("{}: {e}", cand.display())))?;
     let json = parse_jsonc(&text, cand)?;
@@ -470,8 +489,19 @@ fn load_into(cand: &Path, merged: &mut serde_json::Value) -> Result<(), FreedasE
             cand.display()
         )));
     }
+    tracing::info!(layer = ?layer, path = %cand.display(), "loaded config layer");
+    missing_env_vars_error(&json, cand)?;
     let base = cand.parent().unwrap_or(Path::new("."));
-    let substituted = substitute_value(&json, base)?;
+    let gated = layer == Layer::Project && !project_trusted;
+    let mut substituted = substitute_value(&json, base, gated)?;
+    if layer == Layer::Project {
+        sanitize_project_layer(&mut substituted, cand, project_trusted);
+    }
+    if layer == Layer::Org {
+        // The org cache is unsigned; it must never be the channel that turns
+        // on code trust.
+        strip_key(&mut substituted, cand, "trust_project_code");
+    }
     for key in ["model", "small_model"] {
         if let Some(m) = substituted.get(key).and_then(|v| v.as_str()) {
             check_model_in(cand, key, m)?;
@@ -479,6 +509,191 @@ fn load_into(cand: &Path, merged: &mut serde_json::Value) -> Result<(), FreedasE
     }
     deep_merge(merged, substituted);
     Ok(())
+}
+
+/// Warn (once per file) when a user-level config file is group/other
+/// readable: it can hold MCP headers, env values, and permission policy.
+/// System (`/etc`) and project (checked-in) files are expected world-readable.
+#[cfg(unix)]
+fn warn_permissive_config(cand: &Path, layer: Layer) {
+    use std::os::unix::fs::PermissionsExt;
+    if !matches!(layer, Layer::Global | Layer::Org) {
+        return;
+    }
+    if let Ok(meta) = std::fs::metadata(cand)
+        && meta.permissions().mode() & 0o077 != 0
+    {
+        eprintln!(
+            "warning: {} is readable by group/other; consider chmod 600",
+            cand.display()
+        );
+    }
+}
+
+#[cfg(not(unix))]
+fn warn_permissive_config(_cand: &Path, _layer: Layer) {}
+
+/// Config keys a project-layer file may never contribute: they widen
+/// execution trust or sandbox/permission posture, so letting a repo set them
+/// would make the gates they control meaningless. The user can still set
+/// them in global config, `FREEDAS_CONFIG`, or CLI flags.
+fn sanitize_project_layer(json: &mut serde_json::Value, cand: &Path, trusted: bool) {
+    // trust_project_code is always stripped from the project layer: the gate
+    // cannot be opened by the very code it gates.
+    if json
+        .as_object()
+        .is_some_and(|o| o.contains_key("trust_project_code"))
+    {
+        strip_key(json, cand, "trust_project_code");
+        eprintln!(
+            "warning: {}: set `trust_project_code` in global config or FREEDAS_TRUST_PROJECT_CODE=1 to opt in",
+            cand.display()
+        );
+    }
+    if !trusted {
+        for key in ["server", "sandbox", "standards"] {
+            strip_key(json, cand, key);
+        }
+        if json
+            .as_object()
+            .and_then(|o| o.get("permission_mode"))
+            .and_then(|v| v.as_str())
+            .and_then(PermissionMode::parse)
+            == Some(PermissionMode::Bypass)
+        {
+            strip_key(json, cand, "permission_mode");
+        }
+    }
+    let Some(obj) = json.as_object_mut() else {
+        return;
+    };
+    // Plugin specs and MCP cwd that point outside the project are rejected
+    // even when trusted: repo config must not reach arbitrary host paths.
+    if let Some(serde_json::Value::Array(plugins)) = obj.get_mut("plugin") {
+        plugins.retain(|spec| {
+            let pkg = plugin_spec_package(spec);
+            let bad = pkg.is_some_and(|p| {
+                let path = Path::new(p);
+                path.is_absolute()
+                    || p.starts_with('~')
+                    || path
+                        .components()
+                        .any(|c| matches!(c, Component::ParentDir))
+            });
+            if bad {
+                eprintln!(
+                    "warning: {}: ignoring plugin spec `{pkg:?}` in project config (absolute or out-of-root path)",
+                    cand.display()
+                );
+            }
+            !bad
+        });
+    }
+    if let Some(serde_json::Value::Object(mcp)) = obj.get_mut("mcp") {
+        for (name, server) in mcp.iter_mut() {
+            let Some(srv) = server.as_object_mut() else {
+                continue;
+            };
+            let bad_cwd = srv
+                .get("cwd")
+                .and_then(|c| c.as_str())
+                .is_some_and(|cwd| {
+                    let p = Path::new(cwd);
+                    p.is_absolute()
+                        || p.components()
+                            .any(|c| matches!(c, Component::ParentDir))
+                });
+            if bad_cwd {
+                srv.remove("cwd");
+                eprintln!(
+                    "warning: {}: dropping `cwd` for mcp server `{name}` in project config (must stay inside the project)",
+                    cand.display()
+                );
+            }
+        }
+    }
+    // Unknown keys ride through `extra` silently; name them for project files.
+    const KNOWN: &[&str] = &[
+        "$schema", "schema", "model", "small_model", "variant", "permission_mode",
+        "default_agent", "subagent_depth", "disabled_providers", "instructions",
+        "skills", "permission", "memory", "router", "standards", "sandbox",
+        "snapshots", "trust_project_code", "mcp", "plugin", "server", "websearch",
+        "telemetry", "workspace", "theme", "max_steps",
+    ];
+    let unknown: Vec<&str> = obj
+        .keys()
+        .map(|k| k.as_str())
+        .filter(|k| !KNOWN.contains(k))
+        .collect();
+    if !unknown.is_empty() {
+        eprintln!(
+            "warning: {}: unknown config keys (ignored unless consumed downstream): {}",
+            cand.display(),
+            unknown.join(", ")
+        );
+    }
+}
+
+fn strip_key(json: &mut serde_json::Value, cand: &Path, key: &str) {
+    if let Some(obj) = json.as_object_mut()
+        && obj.remove(key).is_some()
+    {
+        eprintln!(
+            "warning: {}: ignoring `{key}` from this layer",
+            cand.display()
+        );
+    }
+}
+
+/// The package/path portion of a plugin spec, whichever accepted shape it
+/// uses (`"p"`, `["p", {..}]`, or `{"package": "p"}`).
+fn plugin_spec_package(spec: &serde_json::Value) -> Option<&str> {
+    match spec {
+        serde_json::Value::String(s) => Some(s),
+        serde_json::Value::Array(a) => a.first().and_then(|v| v.as_str()),
+        serde_json::Value::Object(o) => o.get("package").and_then(|v| v.as_str()),
+        _ => None,
+    }
+}
+
+/// Collect every `{env:VAR}` referenced by a config value and fail with one
+/// error naming all missing variables, so a bad key set doesn't get reported
+/// one-run-at-a-time.
+fn missing_env_vars_error(json: &serde_json::Value, cand: &Path) -> Result<(), FreedasError> {
+    fn walk(v: &serde_json::Value, missing: &mut Vec<String>) {
+        match v {
+            serde_json::Value::String(s) => {
+                let mut rest = s.as_str();
+                while let Some(start) = rest.find("{env:") {
+                    let tail = &rest[start + 5..];
+                    match tail.find('}') {
+                        Some(end) => {
+                            let var = &tail[..end];
+                            if std::env::var_os(var).is_none() && !missing.iter().any(|m| m == var) {
+                                missing.push(var.to_string());
+                            }
+                            rest = &tail[end + 1..];
+                        }
+                        None => break,
+                    }
+                }
+            }
+            serde_json::Value::Array(a) => a.iter().for_each(|x| walk(x, missing)),
+            serde_json::Value::Object(o) => o.values().for_each(|x| walk(x, missing)),
+            _ => {}
+        }
+    }
+    let mut missing = Vec::new();
+    walk(json, &mut missing);
+    if missing.is_empty() {
+        Ok(())
+    } else {
+        Err(FreedasError::Config(format!(
+            "{}: missing environment variables: {}",
+            cand.display(),
+            missing.join(", ")
+        )))
+    }
 }
 
 fn check_model_in(cand: &Path, key: &str, model: &str) -> Result<(), FreedasError> {
@@ -559,8 +774,29 @@ fn read_substituted_file(base: &Path, rel: &str) -> Result<String, FreedasError>
             "{{file:{rel}}}: larger than {CAP} bytes"
         )));
     }
-    std::fs::read_to_string(&canon)
-        .map_err(|e| FreedasError::Config(format!("cannot read {}: {e}", canon.display())))
+    // Read through an fd opened on the canonical path with O_NOFOLLOW so a
+    // last-component symlink swap between the check and the read cannot
+    // redirect the read outside the config directory.
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NOFOLLOW);
+    }
+    let file = options
+        .open(&canon)
+        .map_err(|e| FreedasError::Config(format!("cannot read {}: {e}", canon.display())))?;
+    let mut limited = std::io::Read::take(file, CAP + 1);
+    let mut text = String::new();
+    std::io::Read::read_to_string(&mut limited, &mut text)
+        .map_err(|e| FreedasError::Config(format!("cannot read {}: {e}", canon.display())))?;
+    if text.len() as u64 > CAP {
+        return Err(FreedasError::Config(format!(
+            "{{file:{rel}}}: larger than {CAP} bytes"
+        )));
+    }
+    Ok(text)
 }
 
 fn parse_jsonc(text: &str, path: &Path) -> Result<serde_json::Value, FreedasError> {
@@ -611,23 +847,54 @@ fn warn_sensitive_substitution(s: &str, top: Option<&str>) {
     }
 }
 
-fn substitute_value(v: &serde_json::Value, base: &Path) -> Result<serde_json::Value, FreedasError> {
-    substitute_value_at(v, base, None)
+fn substitute_value(
+    v: &serde_json::Value,
+    base: &Path,
+    gated: bool,
+) -> Result<serde_json::Value, FreedasError> {
+    substitute_value_at(v, base, None, gated)
+}
+
+/// Deny `{env:}`/`{file:}` inside a sensitive top-level key when the file is
+/// an untrusted project layer. `{env:}` there lets a repo pull secrets into
+/// outbound headers/URLs; `{file:}` additionally bypasses the read
+/// permission engine. Trusted layers keep the warning-only behaviour.
+fn deny_untrusted_substitution(s: &str, top: Option<&str>) -> Result<(), FreedasError> {
+    let Some(key) = top else {
+        return Ok(());
+    };
+    if !sensitive_substitution_key(key) {
+        return Ok(());
+    }
+    for kind in ["{env:", "{file:"] {
+        if s.contains(kind) {
+            return Err(FreedasError::Config(format!(
+                "{kind}…}} in config key `{key}` is not allowed in an untrusted project config \
+                 (set trust_project_code in global config or FREEDAS_TRUST_PROJECT_CODE=1 to allow)"
+            )));
+        }
+    }
+    Ok(())
 }
 
 fn substitute_value_at(
     v: &serde_json::Value,
     base: &Path,
     top: Option<&str>,
+    gated: bool,
 ) -> Result<serde_json::Value, FreedasError> {
     match v {
         serde_json::Value::String(s) => {
-            warn_sensitive_substitution(s, top);
+            if gated {
+                deny_untrusted_substitution(s, top)?;
+            } else {
+                warn_sensitive_substitution(s, top);
+            }
             Ok(serde_json::Value::String(substitute(s, base)?))
         }
         serde_json::Value::Array(a) => Ok(serde_json::Value::Array(
             a.iter()
-                .map(|x| substitute_value_at(x, base, top))
+                .map(|x| substitute_value_at(x, base, top, gated))
                 .collect::<std::result::Result<Vec<_>, FreedasError>>()?,
         )),
         serde_json::Value::Object(o) => {
@@ -641,7 +908,7 @@ fn substitute_value_at(
                             };
                             Ok::<(String, serde_json::Value), FreedasError>((
                                 k.clone(),
-                                substitute_value_at(x, base, child)?,
+                                substitute_value_at(x, base, child, gated)?,
                             ))
                         })
                         .collect::<std::result::Result<
@@ -697,14 +964,19 @@ fn global_candidates(paths: &Paths) -> Vec<PathBuf> {
     ]
 }
 
-/// Project config files, lowest to highest: direct files from the farthest
-/// ancestor down to the project directory, then `.freedas/` files in
-/// the same order.
-fn project_candidates(paths: &Paths) -> Vec<PathBuf> {
+/// Project config files, lowest to highest. By default only the project root
+/// itself is considered: direct `freedas.json[c]` files, then `.freedas/`
+/// files. Setting `FREEDAS_CONFIG_ANCESTORS=1` restores the legacy walk of
+/// every ancestor up to `/` — any writable parent directory could then plant
+/// a config that overrides project settings, so it stays opt-in.
+fn project_candidates(paths: &Paths, include_ancestors: bool) -> Vec<PathBuf> {
     let mut ancestors = Vec::new();
     let mut dir = paths.project_root.clone();
     loop {
         ancestors.push(dir.clone());
+        if !include_ancestors {
+            break;
+        }
         match dir.parent() {
             Some(parent) => dir = parent.to_path_buf(),
             None => break,
@@ -725,10 +997,51 @@ fn project_candidates(paths: &Paths) -> Vec<PathBuf> {
     v
 }
 
-/// Default TTL for the cached organization settings, applied to the wrapped
-/// form when `ttl_secs` is absent and unconditionally to the bare-object form
-/// (via file mtime, which is its only age bound).
+fn ancestors_enabled() -> bool {
+    std::env::var("FREEDAS_CONFIG_ANCESTORS")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
+/// Whether project-sourced executable content is trusted without per-item
+/// approval. Mirrors `Config::trust_project_code` / `FREEDAS_TRUST_PROJECT_CODE`;
+/// decided before project layers merge, and project files can never set it.
+fn project_trust_enabled(merged: &serde_json::Value) -> bool {
+    merged
+        .get("trust_project_code")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+        || std::env::var("FREEDAS_TRUST_PROJECT_CODE")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false)
+}
+
+/// Default TTL for the cached organization settings. The wrapped form
+/// `{fetched_at, ttl_secs?, settings}` is required; a planted `ttl_secs` is
+/// clamped to `MAX_ORG_TTL_SECS` so the cache cannot persist forever.
 const DEFAULT_ORG_TTL_SECS: i64 = 3600;
+const MAX_ORG_TTL_SECS: i64 = 86400;
+/// Acceptable clock skew when checking `fetched_at` for future timestamps.
+const ORG_CLOCK_SKEW_SECS: i64 = 300;
+
+/// The org settings cache is a regular, private file written by
+/// `cache_org_settings` only. Anything else (symlink, world/group-writable or
+/// readable) is treated as planted and skipped.
+#[cfg(unix)]
+fn org_cache_ok(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    let Ok(meta) = std::fs::symlink_metadata(path) else {
+        return false;
+    };
+    meta.file_type().is_file() && meta.permissions().mode() & 0o077 == 0
+}
+
+#[cfg(not(unix))]
+fn org_cache_ok(path: &Path) -> bool {
+    std::fs::symlink_metadata(path)
+        .map(|m| m.file_type().is_file())
+        .unwrap_or(false)
+}
 
 pub fn load(paths: &Paths, disable_project: bool) -> Result<Config, FreedasError> {
     let mut merged = serde_json::json!({});
@@ -736,23 +1049,37 @@ pub fn load(paths: &Paths, disable_project: bool) -> Result<Config, FreedasError
     // then project files (unless disabled), then the environment.
     if let Ok(explicit) = std::env::var("FREEDAS_CONFIG") {
         // One file replaces the system, global, org, and project layers.
-        load_into(Path::new(&explicit), &mut merged)?;
+        tracing::warn!(
+            "FREEDAS_CONFIG={explicit}: this file replaces all config layers"
+        );
+        load_into(Path::new(&explicit), &mut merged, Layer::Global, true)?;
     } else {
         for cand in global_candidates(paths) {
-            load_into(&cand, &mut merged)?;
+            let layer = if cand.starts_with("/etc/") {
+                Layer::System
+            } else {
+                Layer::Global
+            };
+            load_into(&cand, &mut merged, layer, false)?;
         }
         let org_cache = paths.cache_dir.join("org-settings.json");
-        if let Ok(text) = std::fs::read_to_string(&org_cache)
+        if org_cache.exists() && !org_cache_ok(&org_cache) {
+            eprintln!(
+                "warning: {} is not a private regular file; ignoring cached org settings",
+                org_cache.display()
+            );
+        } else if let Ok(text) = std::fs::read_to_string(&org_cache)
             && let Ok(v) = serde_json::from_str::<serde_json::Value>(&text)
         {
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_secs() as i64)
                 .unwrap_or(i64::MAX);
-            // Wrapped cache `{fetched_at, ttl_secs?, settings}` expires; bare
-            // objects stay backward compatible. Parse errors already skip.
+            // Only the wrapped `{fetched_at, ttl_secs?, settings}` form is
+            // accepted; unauthenticated bare objects are ignored.
             if let Some(obj) = v.as_object()
-                && (obj.contains_key("fetched_at") || obj.contains_key("settings"))
+                && obj.contains_key("fetched_at")
+                && obj.contains_key("settings")
             {
                 let fetched = obj.get("fetched_at").and_then(|x| x.as_i64()).unwrap_or(0);
                 let fetched = if fetched > 1_000_000_000_000 {
@@ -763,36 +1090,36 @@ pub fn load(paths: &Paths, disable_project: bool) -> Result<Config, FreedasError
                 let ttl = obj
                     .get("ttl_secs")
                     .and_then(|x| x.as_i64())
-                    .unwrap_or(DEFAULT_ORG_TTL_SECS);
-                if now - fetched <= ttl
+                    .unwrap_or(DEFAULT_ORG_TTL_SECS)
+                    .clamp(0, MAX_ORG_TTL_SECS);
+                if fetched <= now + ORG_CLOCK_SKEW_SECS
+                    && now - fetched <= ttl
                     && let Some(settings) = obj.get("settings")
                     && settings.is_object()
                 {
-                    deep_merge(&mut merged, settings.clone());
-                }
-            } else if v.is_object() {
-                // Bare objects carry no `fetched_at`, so the file mtime is the
-                // age bound and the default TTL applies unconditionally; a
-                // stale planted policy must not apply forever. An unreadable
-                // mtime fails closed (cache skipped).
-                let fresh = std::fs::metadata(&org_cache)
-                    .and_then(|m| m.modified())
-                    .ok()
-                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                    .is_some_and(|age| now - age.as_secs() as i64 <= DEFAULT_ORG_TTL_SECS);
-                if fresh {
-                    deep_merge(&mut merged, v);
+                    tracing::info!(path = %org_cache.display(), "loaded org settings cache layer");
+                    let mut layer = settings.clone();
+                    // The unsigned cache must never be the channel that turns
+                    // on code trust or picks the bind/exec posture.
+                    for key in ["trust_project_code"] {
+                        if let Some(o) = layer.as_object_mut() {
+                            o.remove(key);
+                        }
+                    }
+                    deep_merge(&mut merged, layer);
                 }
             }
         }
         if !disable_project {
-            for cand in project_candidates(paths) {
-                load_into(&cand, &mut merged)?;
+            let trusted = project_trust_enabled(&merged);
+            for cand in project_candidates(paths, ancestors_enabled()) {
+                load_into(&cand, &mut merged, Layer::Project, trusted)?;
             }
         }
     }
 
     if let Ok(m) = std::env::var("FREEDAS_MODEL") {
+        tracing::info!("FREEDAS_MODEL overrides configured model: {m}");
         check_model_in(Path::new("FREEDAS_MODEL"), "model", &m)?;
         merged["model"] = serde_json::json!(m);
     }
@@ -819,6 +1146,22 @@ pub fn load(paths: &Paths, disable_project: bool) -> Result<Config, FreedasError
         config.permission.rules = rules;
     }
     config.sandbox.network = normalize_network(&config.sandbox.network)?;
+    // Cap the gate fix loop: attempts x GATE_TIMEOUT is unbounded otherwise.
+    config.standards.max_attempts = config.standards.max_attempts.min(10);
+    // The env opt-in mirrors the global-config flag; project layers can never
+    // set the field, so folding it in here cannot be widened by a repo.
+    if std::env::var("FREEDAS_TRUST_PROJECT_CODE")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+    {
+        config.trust_project_code = true;
+    }
+    if config.permission_mode == PermissionMode::Bypass {
+        tracing::warn!(
+            "permission_mode=bypass: every tool call auto-approves; \
+             prefer \"auto\" or \"ask\" unless this run is fully trusted"
+        );
+    }
     Ok(config)
 }
 
@@ -866,12 +1209,23 @@ fn loaded_global_config(paths: &crate::paths::Paths) -> PathBuf {
 }
 
 /// Append an "always allow" rule for an action/resource to the global config;
-/// used when a permission prompt is answered `Always`.
+/// used when a permission prompt is answered `Always`. Glob resources on
+/// read-class actions degrade to allow-once everywhere: a single choke point
+/// so the TUI, server, and tool remember paths cannot persist an over-broad
+/// `*.env`-style allow (matches `persistable_remember` in freedas-tools).
 pub fn remember_rule(
     paths: &crate::paths::Paths,
     action: &str,
     resource: &str,
 ) -> std::io::Result<()> {
+    if matches!(action, "read" | "skill" | "task" | "question")
+        && (resource.contains('*') || resource.contains('?'))
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "glob remember is allow-once only",
+        ));
+    }
     let path = loaded_global_config(paths);
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -932,7 +1286,16 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
         std::process::id()
     ));
     {
-        let mut f = std::fs::File::create(&tmp)?;
+        // Config files can hold credentials (mcp headers/environment), so
+        // create them owner-only rather than inheriting a permissive umask.
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        let mut f = options.open(&tmp)?;
         if let Err(e) = f.write_all(bytes).and_then(|_| f.sync_all()) {
             let _ = std::fs::remove_file(&tmp);
             return Err(e);
@@ -1004,7 +1367,15 @@ mod tests {
     fn project_candidates_put_direct_files_before_dot_dirs() {
         let dir = tempfile::tempdir().unwrap();
         let paths = temp_paths(dir.path());
-        let c = project_candidates(&paths);
+        // Default discovery stops at the project root: ancestors cannot plant
+        // config. The legacy walk is available only via explicit opt-in.
+        let capped = project_candidates(&paths, false);
+        assert!(
+            capped
+                .iter()
+                .all(|x| x.starts_with(&paths.project_root))
+        );
+        let c = project_candidates(&paths, true);
         let repo = dir.path().join("repo");
         let at = |p: PathBuf| c.iter().position(|x| *x == p).unwrap();
         let direct_far = at(repo.join("freedas.json"));
@@ -1171,7 +1542,9 @@ mod tests {
         std::fs::create_dir_all(&paths.config_dir).unwrap();
         let jsonc = paths.config_dir.join("freedas.jsonc");
         std::fs::write(&jsonc, "// keep me\n{\"permission\":{\"edit\":\"ask\"}}\n").unwrap();
-        remember_rule(&paths, "read", "*.env").unwrap();
+        // A glob read allow is allow-once only now; exact resources persist.
+        assert!(remember_rule(&paths, "read", "*.env").is_err());
+        remember_rule(&paths, "read", "src/main.rs").unwrap();
         assert!(
             !paths.global_config().exists(),
             "must not create freedas.json"
@@ -1198,8 +1571,11 @@ mod tests {
     }
 
     #[test]
-    fn permission_mode_defaults_to_bypass() {
-        assert_eq!(Config::default().permission_mode, PermissionMode::Bypass);
+    fn permission_mode_defaults_to_auto() {
+        // Fail-safe default: a missing config must not auto-approve every
+        // tool call; bypass is an explicit opt-in.
+        assert_eq!(Config::default().permission_mode, PermissionMode::Auto);
+        assert_eq!(PermissionMode::default(), PermissionMode::Auto);
         assert!(Config::default().variant.is_none());
     }
 
@@ -1242,7 +1618,7 @@ mod tests {
         let path = dir.path().join("freedas.json");
         std::fs::write(&path, r#"{"permission_mode":"yolo"}"#).unwrap();
         let mut merged = serde_json::json!({});
-        load_into(&path, &mut merged).unwrap();
+        load_into(&path, &mut merged, Layer::Global, false).unwrap();
         assert!(serde_json::from_value::<Config>(merged).is_err());
     }
 }

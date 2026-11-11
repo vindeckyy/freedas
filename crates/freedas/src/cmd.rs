@@ -16,6 +16,46 @@ fn db(p: &Paths) -> Result<Db, Box<dyn std::error::Error>> {
     Ok(Db::open(&p.db_path())?)
 }
 
+/// Collapse the user's home directory to `~` so CLI errors do not disclose
+/// the account name or directory layout in shared logs.
+fn scrub_home(s: &str) -> String {
+    if let Ok(home) = std::env::var("HOME") {
+        let home = home.trim_end_matches(['/', '\\']);
+        if !home.is_empty() {
+            return s
+                .replace(&format!("{home}/"), "~/")
+                .replace(&format!("{home}\\"), "~\\");
+        }
+    }
+    s.to_string()
+}
+
+/// Render a URL with userinfo, query, and fragment stripped, so credentials
+/// embedded in `--attach`/server URLs cannot leak into logs or transcripts.
+fn display_url(url: &str) -> String {
+    match reqwest::Url::parse(url.trim()) {
+        Ok(mut u) => {
+            let _ = u.set_username("");
+            let _ = u.set_password(None);
+            u.set_query(None);
+            u.set_fragment(None);
+            u.to_string()
+        }
+        Err(_) => "[invalid-url]".into(),
+    }
+}
+
+/// Replace occurrences of `base` inside an error message with its
+/// credential-free display form.
+fn scrub_url(msg: &str, base: &str) -> String {
+    let safe = display_url(base);
+    let mut out = msg.replace(base.trim_end_matches('/'), safe.trim_end_matches('/'));
+    if let Ok(u) = reqwest::Url::parse(base) {
+        out = out.replace(u.as_str().trim_end_matches('/'), safe.trim_end_matches('/'));
+    }
+    out
+}
+
 /// CLI `--auto`/`--manual` override the configured mode; both become the
 /// session's `(auto, manual)` tool-context flags.
 fn permission_flags(cli_auto: bool, cli_manual: bool, configured: PermissionMode) -> (bool, bool) {
@@ -78,9 +118,9 @@ pub async fn run(cli: Cli, project_root: PathBuf) -> Result<i32, Box<dyn std::er
         Ok(cfg) => cfg,
         Err(e) => {
             if matches!(&cli.command, None | Some(Commands::Run { .. })) {
-                return Err(format!("config: {e}").into());
+                return Err(format!("config: {}", scrub_home(&e.to_string())).into());
             }
-            eprintln!("config: {e}");
+            eprintln!("config: {}", scrub_home(&e.to_string()));
             Default::default()
         }
     };
@@ -100,7 +140,7 @@ pub async fn run(cli: Cli, project_root: PathBuf) -> Result<i32, Box<dyn std::er
                         let name = name.clone().unwrap_or_else(default_worktree_name);
                         freedas_git::create_worktree(&p.data_dir, &pid, &name, &project_root)
                             .await
-                            .map_err(|e| format!("worktree: {e}"))?
+                            .map_err(|e| format!("worktree: {}", scrub_home(&e.to_string())))?
                     }
                     None => project_root,
                 };
@@ -155,6 +195,14 @@ pub async fn run(cli: Cli, project_root: PathBuf) -> Result<i32, Box<dyn std::er
             auto,
             manual,
         }) => {
+            // The nested flags win over the global pair when either is set;
+            // otherwise the global --auto/--manual applies (same precedence
+            // as --worktree below).
+            let (auto, manual) = if auto || manual {
+                (auto, manual)
+            } else {
+                (cli.auto, cli.manual)
+            };
             let (auto, manual) = permission_flags(auto, manual, cfg.permission_mode);
             if format != "json" && format != "text" {
                 eprintln!("freedas: --format must be json or text");
@@ -167,7 +215,9 @@ pub async fn run(cli: Cli, project_root: PathBuf) -> Result<i32, Box<dyn std::er
             for f in &file {
                 match std::fs::read_to_string(f) {
                     Ok(c) => prompt.push_str(&format!("\n\n--- {f} ---\n{c}")),
-                    Err(e) => return Err(format!("cannot read {f}: {e}").into()),
+                    Err(e) => {
+                        return Err(format!("cannot read {}: {e}", scrub_home(f)).into());
+                    }
                 }
             }
             if !std::io::IsTerminal::is_terminal(&std::io::stdin()) {
@@ -215,7 +265,7 @@ pub async fn run(cli: Cli, project_root: PathBuf) -> Result<i32, Box<dyn std::er
                 let name = name.unwrap_or_else(default_worktree_name);
                 freedas_git::create_worktree(&p.data_dir, &pid, &name, &project_root)
                     .await
-                    .map_err(|e| format!("worktree: {e}"))?
+                    .map_err(|e| format!("worktree: {}", scrub_home(&e.to_string())))?
             } else {
                 project_root
             };
@@ -440,11 +490,17 @@ pub async fn run(cli: Cli, project_root: PathBuf) -> Result<i32, Box<dyn std::er
         },
         Some(Commands::Export {
             id,
-            sanitize,
+            unsanitized,
             output,
         }) => {
-            let text =
-                freedas_db::export_session(&d, &p, &project_root, id.as_deref(), sanitize, "json")?;
+            let text = freedas_db::export_session(
+                &d,
+                &p,
+                &project_root,
+                id.as_deref(),
+                !unsanitized,
+                "json",
+            )?;
             if let Some(path) = output {
                 std::fs::write(path, text)?;
             } else {
@@ -596,7 +652,7 @@ pub async fn run(cli: Cli, project_root: PathBuf) -> Result<i32, Box<dyn std::er
         }
         Some(Commands::Agent { command }) => match command {
             crate::AgentCommands::List => {
-                for a in freedas_agent::merged_agents(&project_root) {
+                for a in freedas_agent::merged_agents(&project_root, cfg.trust_project_code) {
                     println!("{}\t{}\t{}", a.id, a.mode, a.description);
                 }
                 Ok(0)
@@ -659,6 +715,21 @@ pub async fn run(cli: Cli, project_root: PathBuf) -> Result<i32, Box<dyn std::er
                         .filter(|s| !s.is_empty())
                         .map(str::to_string)
                         .collect();
+                }
+                // Frontmatter is `key: value` lines; a newline in any field
+                // would inject extra keys into the generated file.
+                for (name, v) in [
+                    ("id", id.as_str()),
+                    ("description", description.as_str()),
+                    ("mode", mode.as_str()),
+                    ("model", model.as_str()),
+                ]
+                .into_iter()
+                .chain(permission.iter().map(|p| ("permission", p.as_str())))
+                {
+                    if v.chars().any(|c| c == '\n' || c == '\r') {
+                        return Err(format!("{name} must not contain newlines").into());
+                    }
                 }
                 std::fs::create_dir_all(&dir)?;
                 let file = dir.join(format!("{id}.md"));
@@ -761,18 +832,22 @@ pub async fn run(cli: Cli, project_root: PathBuf) -> Result<i32, Box<dyn std::er
             }
             crate::SkillCommands::Forget { id } => {
                 safe_id(&id)?;
-                let mut removed = Vec::new();
-                for dir in [
-                    p.config_dir.join("skills").join(&id),
-                    project_root.join(".freedas").join("skills").join(&id),
-                ] {
-                    if std::fs::remove_dir_all(&dir).is_ok() {
-                        println!("removed {}", dir.display());
-                        removed.push(dir);
-                    }
+                let removed = freedas_skill::forget_skill(&project_root, &cfg.skills, &id);
+                for dir in &removed {
+                    println!("removed {}", dir.display());
                 }
                 if removed.is_empty() {
                     println!("skill {id} not found");
+                }
+                // A losing same-id copy can re-surface once the winner is
+                // gone; report what still resolves so the operator knows.
+                if freedas_skill::discover_with(&project_root, &cfg.skills)
+                    .iter()
+                    .any(|sk| sk.id == id)
+                {
+                    eprintln!(
+                        "warning: skill {id} still resolves from a copy outside the removed roots"
+                    );
                 }
                 Ok(0)
             }
@@ -838,12 +913,10 @@ pub async fn run(cli: Cli, project_root: PathBuf) -> Result<i32, Box<dyn std::er
                     let env_key = format!("MCP_{}_TOKEN", name.to_uppercase());
                     let mut token = std::env::var(&env_key).unwrap_or_default();
                     if token.is_empty() && std::io::IsTerminal::is_terminal(&std::io::stdin()) {
-                        eprint!("OAuth token for {name}: ");
-                        use std::io::{BufRead, Write};
-                        std::io::stderr().flush().ok();
-                        let mut line = String::new();
-                        std::io::stdin().lock().read_line(&mut line).ok();
-                        token = line.trim().to_string();
+                        token = rpassword::prompt_password(format!("OAuth token for {name}: "))
+                            .unwrap_or_default()
+                            .trim()
+                            .to_string();
                     }
                     if token.is_empty() {
                         println!("no token provided; set {env_key} or enter one interactively");
@@ -876,21 +949,16 @@ pub async fn run(cli: Cli, project_root: PathBuf) -> Result<i32, Box<dyn std::er
                         &p.data_dir,
                         &format!("mcp-{name}"),
                     );
-                    let server = if let Some(url) = &sc.url {
-                        freedas_mcp::connect_http_with(&name, url, &sc.headers, auth.as_deref())
-                            .await
-                    } else if let Some(cmd) = &sc.command {
-                        freedas_mcp::connect_stdio(
-                            &name,
-                            cmd,
-                            sc.cwd.as_deref(),
-                            &sc.environment,
-                            sc.timeout_ms,
-                        )
-                        .await
-                    } else {
-                        Err("no url or command".to_string())
-                    };
+                    // Route through the same per-hash trust gate session
+                    // connects use; debugging an unapproved project server
+                    // must not silently become code execution.
+                    let server = freedas_mcp::connect_configured_with_approval(
+                        &name,
+                        sc,
+                        auth.as_deref(),
+                        cfg.trust_project_code,
+                    )
+                    .await;
                     match server {
                         Ok(s) => {
                             println!("connected to {name}");
@@ -982,7 +1050,9 @@ pub async fn run(cli: Cli, project_root: PathBuf) -> Result<i32, Box<dyn std::er
                     for e in rd.flatten() {
                         let base = e.file_name().to_string_lossy().to_string();
                         if base == *r || base.starts_with(&format!("{r}@")) {
-                            let _ = std::fs::remove_dir_all(e.path());
+                            let path = e.path();
+                            let _ = std::fs::remove_dir_all(&path);
+                            freedas_plugin::prune_trust(&path);
                             found = true;
                         }
                     }
@@ -1339,7 +1409,9 @@ pub async fn run(cli: Cli, project_root: PathBuf) -> Result<i32, Box<dyn std::er
                 return Ok(2);
             }
             // Read-only live transcript view of a running server.
-            let sessions = freedas_server::client::list_sessions(&url).await?;
+            let sessions = freedas_server::client::list_sessions(&url)
+                .await
+                .map_err(|e| scrub_url(&e, &url))?;
             let mut target = cli.session.clone();
             if target.is_none() && cli.continue_ {
                 target = sessions
@@ -1348,7 +1420,7 @@ pub async fn run(cli: Cli, project_root: PathBuf) -> Result<i32, Box<dyn std::er
                     .and_then(|v| v.as_str())
                     .map(str::to_string);
             }
-            println!("attached to {url}");
+            println!("attached to {}", display_url(&url));
             for s in &sessions {
                 let id = s.get("id").and_then(|v| v.as_str()).unwrap_or("");
                 let title = s.get("title").and_then(|v| v.as_str()).unwrap_or("");
@@ -1387,10 +1459,14 @@ pub async fn run(cli: Cli, project_root: PathBuf) -> Result<i32, Box<dyn std::er
                     _ => {}
                 }
             })
-            .await?;
+            .await
+            .map_err(|e| scrub_url(&e, &url))?;
             Ok(0)
         }
         Some(Commands::Pr { number }) => {
+            if number < 1 {
+                return Err("PR number must be positive".into());
+            }
             // Prefer `gh pr checkout`; fall back to a git fetch of the PR ref.
             let gh = tokio::process::Command::new("gh")
                 .args(["pr", "checkout", &number.to_string()])
@@ -1410,11 +1486,18 @@ pub async fn run(cli: Cli, project_root: PathBuf) -> Result<i32, Box<dyn std::er
                 if !fetch.status.success() {
                     return Err("failed to fetch PR ref (is `gh` installed? or set a token)".into());
                 }
-                tokio::process::Command::new("git")
-                    .args(["checkout", &branch])
+                let out = tokio::process::Command::new("git")
+                    .args(["checkout", "-B", &branch])
                     .current_dir(&project_root)
                     .output()
                     .await?;
+                if !out.status.success() {
+                    return Err(format!(
+                        "git checkout failed: {}",
+                        String::from_utf8_lossy(&out.stderr).trim()
+                    )
+                    .into());
+                }
                 println!("checked out PR #{number} on branch {branch}");
             }
             // Start the TUI in that checkout.
@@ -1595,33 +1678,62 @@ pub async fn run(cli: Cli, project_root: PathBuf) -> Result<i32, Box<dyn std::er
             }
             Ok(0)
         }
-        Some(Commands::Memory { command }) => match command {
-            crate::MemoryCommands::List => {
-                let mem = freedas_memory::Memory::new(d, None);
-                for t in mem.recall(50) {
-                    println!("- {t}");
+        Some(Commands::Memory { command }) => {
+            // Scoped to the current project unless --global widens it.
+            let mem_scope = |d: &freedas_db::Db, global: bool| -> Result<Option<String>, Box<dyn std::error::Error>> {
+                if global {
+                    Ok(None)
+                } else {
+                    Ok(Some(d.ensure_project(&project_root)?))
                 }
-                Ok(0)
-            }
-            crate::MemoryCommands::Show { id } => {
-                match d.get_memory(&id)? {
-                    Some((scope, kind, text, confidence)) => {
-                        println!("{id}\tscope={scope}\tkind={kind}\tconfidence={confidence}");
-                        println!("{text}");
+            };
+            match command {
+                crate::MemoryCommands::List { global } => {
+                    let scope = mem_scope(&d, global)?;
+                    let mem = freedas_memory::Memory::new(d, scope);
+                    for t in mem.recall(50) {
+                        println!("- {}", freedas_core::redact::redact(&t));
                     }
-                    None => println!("memory {id} not found"),
+                    Ok(0)
                 }
-                Ok(0)
+                crate::MemoryCommands::Show { id, global } => {
+                    match d.get_memory(&id)? {
+                        Some((scope, kind, text, confidence, project_id)) => {
+                            let cur = mem_scope(&d, global)?;
+                            if cur.is_some() && scope == "project" && project_id != cur {
+                                return Err(format!(
+                                    "memory {id} belongs to another project; pass --global"
+                                )
+                                .into());
+                            }
+                            println!("{id}\tscope={scope}\tkind={kind}\tconfidence={confidence}");
+                            println!("{}", freedas_core::redact::redact(&text));
+                        }
+                        None => println!("memory {id} not found"),
+                    }
+                    Ok(0)
+                }
+                crate::MemoryCommands::Forget { id, global } => {
+                    // Ownership check before delete so one project's CLI
+                    // cannot erase another project's rows.
+                    if let Some((scope, _, _, _, project_id)) = d.get_memory(&id)? {
+                        let cur = mem_scope(&d, global)?;
+                        if cur.is_some() && scope == "project" && project_id != cur {
+                            return Err(format!(
+                                "memory {id} belongs to another project; pass --global"
+                            )
+                            .into());
+                        }
+                    }
+                    println!("forgot={}", d.delete_memory(&id)?);
+                    Ok(0)
+                }
+                crate::MemoryCommands::Export => {
+                    print!("{}", d.export_memory()?);
+                    Ok(0)
+                }
             }
-            crate::MemoryCommands::Forget { id } => {
-                println!("forgot={}", d.delete_memory(&id)?);
-                Ok(0)
-            }
-            crate::MemoryCommands::Export => {
-                print!("{}", d.export_memory()?);
-                Ok(0)
-            }
-        },
+        }
         Some(Commands::Rules) => {
             // Print exactly the documented block; it already ends in a newline.
             print!("{RULES}");
@@ -1646,10 +1758,22 @@ pub async fn run(cli: Cli, project_root: PathBuf) -> Result<i32, Box<dyn std::er
                     }
                 };
                 let mut bench_cfg = config::load(&p, false)?;
+                if let Some(m) = &model
+                    && freedas_catalog::get_model(&freedas_catalog::builtin_catalog(), m)
+                        .is_none()
+                {
+                    eprintln!(
+                        "freedas: --model {m:?} is not in the catalog;                          an unknown pin runs unpriced and unfiltered"
+                    );
+                    return Ok(2);
+                }
                 if let Some(m) = &router_mode {
                     bench_cfg.router.mode = m.clone();
                     bench_cfg.router.learn = m == "learned";
                 }
+                eprintln!(
+                    "freedas: bench runs the agent with bypassed permissions;                      only run suites whose tasks you trust"
+                );
                 let suite_path = std::path::PathBuf::from(&suite);
                 let repeat = repeat.unwrap_or(1);
                 let mut results = Vec::new();
@@ -1660,6 +1784,29 @@ pub async fn run(cli: Cli, project_root: PathBuf) -> Result<i32, Box<dyn std::er
                         let repo_path = if std::path::Path::new(&task.repo).exists() {
                             std::path::PathBuf::from(&task.repo)
                         } else {
+                            // task.yaml controls repo/branch: only HTTPS remotes
+                            // and a `--` separator keep them from becoming git
+                            // options or fetch-proxy URLs.
+                            if !task.repo.starts_with("https://") {
+                                eprintln!(
+                                    "bench {} skipped: remote repo must be https://",
+                                    flat(&task.id)
+                                );
+                                continue;
+                            }
+                            if task.base_branch.starts_with('-')
+                                || !task
+                                    .base_branch
+                                    .bytes()
+                                    .all(|b| b.is_ascii_alphanumeric()
+                                        || matches!(b, b'-' | b'_' | b'.' | b'/'))
+                            {
+                                eprintln!(
+                                    "bench {} skipped: invalid base_branch",
+                                    flat(&task.id)
+                                );
+                                continue;
+                            }
                             let dest = p.cache_dir.join("bench").join(&task.id);
                             if !dest.exists() {
                                 tokio::process::Command::new("git")
@@ -1669,6 +1816,7 @@ pub async fn run(cli: Cli, project_root: PathBuf) -> Result<i32, Box<dyn std::er
                                         "1",
                                         "--branch",
                                         &task.base_branch,
+                                        "--",
                                         &task.repo,
                                         &dest.to_string_lossy(),
                                     ])
@@ -1717,7 +1865,7 @@ pub async fn run(cli: Cli, project_root: PathBuf) -> Result<i32, Box<dyn std::er
                             }
                         };
                         if let Err(e) = &agent_run {
-                            eprintln!("bench {} failed: {e}", task.id);
+                            eprintln!("bench {} failed: {e}", flat(&task.id));
                         }
                         results.push(serde_json::json!({"task": task.id, "passed": outcome.passed, "verified": outcome.verified, "completed": completed, "cost_usd": cost_usd, "tokens": tokens}));
                     }
@@ -1727,6 +1875,7 @@ pub async fn run(cli: Cli, project_root: PathBuf) -> Result<i32, Box<dyn std::er
                         .iter()
                         .map(|r| freedas_bench::BenchResult {
                             task_id: r["task"].as_str().unwrap_or_default().to_string(),
+                            verified: r["verified"].as_bool().unwrap_or(false),
                             passed: r["passed"].as_bool().unwrap_or(false),
                             cost_usd: r["cost_usd"].as_f64().unwrap_or_default(),
                             tokens: r["tokens"].as_u64().unwrap_or_default(),
@@ -1760,7 +1909,7 @@ pub async fn run(cli: Cli, project_root: PathBuf) -> Result<i32, Box<dyn std::er
                         } else {
                             " (unverified)"
                         };
-                        println!("{} {}{}", r["task"], status, suffix);
+                        println!("{} {}{}", flat(r["task"].as_str().unwrap_or_default()), status, suffix);
                     }
                 }
                 Ok(0)
@@ -2096,8 +2245,12 @@ async fn report_session_metadata(
         "inputTokens": input,
         "outputTokens": output,
         "costUsd": cost,
-        "filesRead": r.files_read,
-        "promptExcerpt": prompt_excerpt,
+        "filesRead": r
+            .files_read
+            .iter()
+            .map(|f| freedas_core::redact::redact(f))
+            .collect::<Vec<_>>(),
+        "promptExcerpt": freedas_core::redact::redact(prompt_excerpt),
         "startedAt": started_at,
         "endedAt": freedas_core::paths::now_ms(),
     });
@@ -2154,16 +2307,18 @@ fn server_auth() -> Option<String> {
 }
 
 /// Client for the local server, carrying the configured credentials.
-fn server_client() -> Result<reqwest::Client, reqwest::Error> {
+/// A configured-but-unencodable credential is a hard error: silently
+/// dropping the header would send the request unauthenticated.
+fn server_client() -> Result<reqwest::Client, String> {
     let mut builder = reqwest::Client::builder();
-    if let Some(auth) = server_auth()
-        && let Ok(value) = reqwest::header::HeaderValue::from_str(&auth)
-    {
+    if let Some(auth) = server_auth() {
+        let value = reqwest::header::HeaderValue::from_str(&auth)
+            .map_err(|_| "server credential contains invalid characters".to_string())?;
         let mut headers = reqwest::header::HeaderMap::new();
         headers.insert(reqwest::header::AUTHORIZATION, value);
         builder = builder.default_headers(headers);
     }
-    builder.build()
+    builder.build().map_err(|e| e.to_string())
 }
 
 /// Run one prompt against a server and stream its events until idle.
@@ -2183,7 +2338,7 @@ async fn attach_run(opts: AttachRun) -> Result<i32, Box<dyn std::error::Error>> 
             None,
         )
         .await
-        .map_err(|e| format!("attach: {e}"))?;
+        .map_err(|e| format!("attach: {}", scrub_url(&e, &base)))?;
         session_id = rows
             .as_array()
             .and_then(|rows| rows.first())
@@ -2201,7 +2356,7 @@ async fn attach_run(opts: AttachRun) -> Result<i32, Box<dyn std::error::Error>> 
             Some(&serde_json::json!({})),
         )
         .await
-        .map_err(|e| format!("attach: fork: {e}"))?;
+        .map_err(|e| format!("attach: fork: {}", scrub_url(&e, &base)))?;
         session_id = Some(
             forked
                 .get("id")
@@ -2220,7 +2375,7 @@ async fn attach_run(opts: AttachRun) -> Result<i32, Box<dyn std::error::Error>> 
                 Some(&serde_json::json!({"title": opts.title, "agent": opts.agent})),
             )
             .await
-            .map_err(|e| format!("attach: {e}"))?;
+            .map_err(|e| format!("attach: {}", scrub_url(&e, &base)))?;
             created
                 .get("id")
                 .and_then(|v| v.as_str())
@@ -2233,9 +2388,9 @@ async fn attach_run(opts: AttachRun) -> Result<i32, Box<dyn std::error::Error>> 
         .get(format!("{base}/event"))
         .send()
         .await
-        .map_err(|e| format!("attach: {e}"))?
+        .map_err(|e| format!("attach: {}", scrub_url(&e.to_string(), &base)))?
         .error_for_status()
-        .map_err(|e| format!("attach: {e}"))?;
+        .map_err(|e| format!("attach: {}", scrub_url(&e.to_string(), &base)))?;
     let mut body = serde_json::json!({
         "text": opts.task,
         "auto": opts.auto,
@@ -2264,7 +2419,9 @@ async fn attach_run(opts: AttachRun) -> Result<i32, Box<dyn std::error::Error>> 
             match tokio::time::timeout(std::time::Duration::from_secs(300), resp.chunk()).await {
                 Ok(Ok(Some(chunk))) => chunk,
                 Ok(Ok(None)) => break,
-                Ok(Err(e)) => return Err(format!("attach: {e}").into()),
+                Ok(Err(e)) => {
+                    return Err(format!("attach: {}", scrub_url(&e.to_string(), &base)).into());
+                }
                 Err(_) => return Err("attach: timed out waiting for server events".into()),
             };
         buffer.push_str(&String::from_utf8_lossy(&chunk));
@@ -2331,7 +2488,9 @@ async fn attach_run(opts: AttachRun) -> Result<i32, Box<dyn std::error::Error>> 
     // means the server never started it.
     match tokio::time::timeout(std::time::Duration::from_secs(30), prompt_task).await {
         Ok(Ok(Ok(_))) => {}
-        Ok(Ok(Err(e))) => return Err(format!("attach: prompt failed: {e}").into()),
+        Ok(Ok(Err(e))) => {
+            return Err(format!("attach: prompt failed: {}", scrub_url(&e, &base)).into());
+        }
         Ok(Err(e)) => return Err(format!("attach: prompt task failed: {e}").into()),
         Err(_) => return Err("attach: prompt request did not complete".into()),
     }
@@ -2666,4 +2825,13 @@ mod tests {
         );
         std::fs::remove_dir_all(&dir).ok();
     }
+}
+
+/// Strip control characters so an untrusted string cannot forge output lines.
+fn flat(text: &str) -> String {
+    text.chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect::<String>()
+        .trim()
+        .to_string()
 }

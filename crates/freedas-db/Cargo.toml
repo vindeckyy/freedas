@@ -13,6 +13,7 @@ ulid.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+sha2 = "0.11.1"
 
 [dev-dependencies]
 tempfile.workspace = true

@@ -68,7 +68,7 @@ enum Commands {
     /// Connect the TUI to a running server
     Attach { url: String },
     /// Check out a pull request and start
-    Pr { number: i64 },
+    Pr { number: u64 },
     /// Session management
     Session {
         #[command(subcommand)]
@@ -77,8 +77,9 @@ enum Commands {
     /// Export a session as JSON
     Export {
         id: Option<String>,
+        /// Disable secret/home-path redaction (raw backup; default sanitizes)
         #[arg(long)]
-        sanitize: bool,
+        unsanitized: bool,
         #[arg(long)]
         output: Option<String>,
     },
@@ -337,9 +338,21 @@ enum RouterCommands {
 
 #[derive(Subcommand, Debug, Clone)]
 enum MemoryCommands {
-    List,
-    Show { id: String },
-    Forget { id: String },
+    List {
+        /// Include every project's memories, not just this project's.
+        #[arg(long)]
+        global: bool,
+    },
+    Show {
+        id: String,
+        #[arg(long)]
+        global: bool,
+    },
+    Forget {
+        id: String,
+        #[arg(long)]
+        global: bool,
+    },
     Export,
 }
 

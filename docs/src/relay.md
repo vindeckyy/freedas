@@ -48,16 +48,24 @@ freedas-relay-server --token <token>           # ws://127.0.0.1:8082/ws
 freedas-relay-server --host 0.0.0.0 --token <token>
 ```
 
-Refuses to bind a non-loopback host without `--token` (env
-`FREEDAS_RELAY_TOKEN`). It tracks machine presence in memory, fans events out
-to connected dashboards, and stores no transcript. The dashboard API needs
-the same bearer token as the `hello` frame:
+Refuses to bind a non-loopback host without `--token` (env `RELAY_TOKEN`;
+`FREEDAS_RELAY_TOKEN` is the client-side name). Per-machine credentials can
+be layered on with `RELAY_MACHINE_TOKENS` (`id=token,id=token`) and scope
+allowlists with `RELAY_MACHINE_SCOPES`; failed authentication backs off.
+The server assigns event sequence numbers itself — client-supplied `seq`
+values are ignored — and discards exact replayed payloads. Machine-originated
+events go to the dashboard channel only, never to peer machine sockets, and
+history plus tracked sessions are bounded. The dashboard API needs the same
+bearer token as the `hello` frame; for browser `EventSource` clients,
+`GET /events/ticket` first mints a short-lived one-time ticket accepted as
+`/events?token=`:
 
 | Method | Path | Purpose |
 |---|---|---|
 | GET | `/health` | Health |
 | GET | `/ws` | Machine WebSocket upgrade |
-| GET | `/events` | SSE fan-out to dashboards (`?token=` or `Authorization`) |
+| GET | `/events` | SSE fan-out to dashboards (`Authorization`, or `?token=` for browser `EventSource`) |
+| GET | `/events/ticket` | Mint a one-time SSE ticket for `/events?token=` |
 | GET | `/machines` | Connected machines and exposed session counts |
 | GET | `/sessions` | Every exposed session |
 | GET | `/sessions/{id}/summary` | Latest usage totals |

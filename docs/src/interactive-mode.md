@@ -58,7 +58,7 @@ denies. `Ctrl+C` cancels the whole run and fails the ask.
 ## Permission modes
 
 The TUI starts in the mode from `permission_mode` in config (default
-`bypass`). `/permissions` opens a picker with three modes and saves the choice
+`auto`). `/permissions` opens a picker with three modes and saves the choice
 to the global config:
 
 - `bypass` - never ask; explicit deny rules still block.

@@ -50,7 +50,7 @@ freedas --version                # verify the binary
 fd                              # open the terminal UI
 ```
 
-The installer picks the asset matching your OS and CPU from the cargo-dist triples in `Cargo.toml`, verifies sha256 when the release publishes one, and defines `fd` as a shell function (fish and POSIX forms) so it still opens Freedas when fd-find owns `fd` on PATH. Reopen the terminal after install so the function loads.
+The installer picks the asset matching your OS and CPU from the cargo-dist triples in `Cargo.toml`, requires the published sha256 (and verifies a cosign signature when one ships), and defines `fd` as a shell function (fish and POSIX forms) so it still opens Freedas when fd-find owns `fd` on PATH. Reopen the terminal after install so the function loads. musl hosts (Alpine) build from source — only glibc Linux assets ship.
 
 Build from source instead:
 

@@ -10,8 +10,9 @@ bills per second with a 60-second minimum, separately from model usage.
 
 Sandboxes are rows in the control-plane `sandboxes` table, created from the
 dashboard (`POST /sandboxes` with `repo`, `base_branch`, `task`) when
-`sandboxes_enabled` is on for the workspace and the wallet covers the
-estimated run. Endpoints: `GET/POST /sandboxes`, `GET /sandboxes/{id}`,
+`sandboxes_enabled` is on for the workspace, the wallet covers the 60-second
+minimum, and no workspace budget would be exceeded by that minimum —
+exhausted budgets reject the create with `402`. Endpoints: `GET/POST /sandboxes`, `GET /sandboxes/{id}`,
 `POST /sandboxes/{id}/stop`, `POST /sandboxes/{id}/heartbeat`,
 `POST /sandboxes/{id}/token` (mints the scoped model/GitHub token the runner
 injects). A sandbox that misses heartbeats for 60 s is reaped as `failed`.
@@ -73,7 +74,10 @@ spec:
         seccompProfile: { type: RuntimeDefault }
       containers:
         - name: agent
-          image: <image>
+          image: <image>          # prefer a digest-pinned image
+          imagePullPolicy: Always
+          resources:
+            limits: { cpu: "2", memory: "4Gi", ephemeral-storage: "1Gi" }
           securityContext:
             allowPrivilegeEscalation: false
             capabilities: { drop: ["ALL"] }
@@ -82,12 +86,20 @@ spec:
             - { name: workspace, mountPath: /workspace }
             - { name: tmp, mountPath: /tmp }
       volumes:
-        - { name: workspace, emptyDir: {} }
-        - { name: tmp, emptyDir: {} }
+        - { name: workspace, emptyDir: { sizeLimit: "512Mi" } }
+        - { name: tmp, emptyDir: { sizeLimit: "128Mi" } }
 ```
 
 The Job image does the checkout/push itself with injected tokens; the runner
-watches status and bills. The Job is deleted on teardown.
+watches status and bills. The Job, Secret, and NetworkPolicy are deleted on
+teardown, and teardown failures are logged with the sandbox id so orphaned
+objects can be reconciled. The per-sandbox NetworkPolicy is default-deny
+except DNS and TCP 443 to non-private space (the `ipBlock` excludes
+RFC1918, loopback, link-local, and metadata ranges where the CNI honors
+`except`); an FQDN-aware CNI can tighten 443 further. Sandbox ids are
+validated (`[A-Za-z0-9_-]{1,64}`) before they reach object names or host
+paths, and a non-finite or negative `compute_rate_usd` fails the row instead
+of billing garbage.
 
 ## Tokens
 

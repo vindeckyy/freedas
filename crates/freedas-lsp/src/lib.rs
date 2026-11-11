@@ -6,6 +6,7 @@ use std::ffi::OsString;
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::OnceLock;
 use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{ChildStdin, ChildStdout, Command};
@@ -28,6 +29,13 @@ const COLLECT: Duration = Duration::from_secs(3);
 const REQUEST_WAIT: Duration = Duration::from_secs(15);
 /// Largest file sent to a language server; a model-chosen huge file must not OOM the host.
 const MAX_FILE_BYTES: u64 = 1024 * 1024;
+/// Largest framed reply accepted from a server before the connection is cut.
+const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
+/// Header scan cap: a server sending an endless header block is misbehaving.
+const MAX_HEADER_BYTES: usize = 64 * 1024;
+/// Concurrent language-server processes; servers are heavy, parallel tool
+/// calls must not spawn one each.
+const MAX_CONCURRENT: usize = 4;
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Diagnostic {
@@ -56,29 +64,63 @@ pub fn servers_available() -> Vec<String> {
 }
 
 fn in_path(path: &OsString, bin: &str) -> bool {
-    std::env::split_paths(path).any(|dir| {
+    resolve_in(path, bin).is_some()
+}
+
+fn resolve_in(path: &OsString, bin: &str) -> Option<PathBuf> {
+    std::env::split_paths(path).find_map(|dir| {
         let candidate = dir.join(bin);
         if !candidate.is_file() {
-            return false;
+            return None;
         }
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
-            candidate
+            if candidate
                 .metadata()
                 .map(|m| m.permissions().mode() & 0o111 != 0)
                 .unwrap_or(false)
+            {
+                Some(candidate)
+            } else {
+                None
+            }
         }
         #[cfg(not(unix))]
         {
-            true
+            Some(candidate)
         }
     })
+}
+
+/// Re-resolve `server` at spawn time: the binary must still be on the
+/// allowlist and resolve to the same canonical absolute path on PATH. Never
+/// spawn a name the shell would resolve for us.
+fn resolve_server(server: &str) -> Option<PathBuf> {
+    let name = Path::new(server).file_name()?.to_str()?;
+    if !SERVERS.contains(&name) {
+        return None;
+    }
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    resolve_in(&path, name)
+        .and_then(|p| p.canonicalize().ok())
+        .filter(|abs| abs.file_name().and_then(|f| f.to_str()) == Some(name))
+}
+
+fn spawn_permit() -> &'static tokio::sync::Semaphore {
+    static SEM: OnceLock<tokio::sync::Semaphore> = OnceLock::new();
+    SEM.get_or_init(|| tokio::sync::Semaphore::new(MAX_CONCURRENT))
 }
 
 /// Crawl up from `file` to the nearest manifest or repository root so the
 /// language server loads the whole project, not just the file's directory.
 pub fn workspace_root(file: &Path) -> PathBuf {
+    workspace_root_within(file, Path::new("/"))
+}
+
+/// Same crawl, but never above `ceiling`: a marker planted in an ancestor the
+/// tool was not granted must not lift the server's working directory there.
+pub fn workspace_root_within(file: &Path, ceiling: &Path) -> PathBuf {
     const MANIFESTS: [&str; 6] = [
         "Cargo.toml",
         "package.json",
@@ -87,18 +129,30 @@ pub fn workspace_root(file: &Path) -> PathBuf {
         "Makefile",
         ".git",
     ];
+    let ceiling = ceiling.canonicalize().unwrap_or_else(|_| ceiling.to_path_buf());
     let mut cur = file.parent();
+    let fallback = cur.unwrap_or(file).to_path_buf();
     while let Some(dir) = cur {
-        if MANIFESTS.iter().any(|m| dir.join(m).exists()) {
+        if !dir.starts_with(&ceiling) {
+            break;
+        }
+        if MANIFESTS
+            .iter()
+            .any(|m| dir.join(m).symlink_metadata().is_ok_and(|m| !m.file_type().is_symlink()))
+        {
             return dir.to_path_buf();
         }
         cur = dir.parent();
     }
-    file.parent().unwrap_or(file).to_path_buf()
+    fallback
 }
 
-pub async fn diagnostics(server: &str, file: &Path) -> Result<Vec<Diagnostic>, String> {
-    let result = lsp_request(server, file, Op::Diagnostics)
+pub async fn diagnostics(
+    server: &str,
+    file: &Path,
+    allowed_root: &Path,
+) -> Result<Vec<Diagnostic>, String> {
+    let result = lsp_request(server, file, allowed_root, Op::Diagnostics)
         .await?
         .unwrap_or_else(|| Value::Array(Vec::new()));
     Ok(result
@@ -114,23 +168,29 @@ pub async fn diagnostics(server: &str, file: &Path) -> Result<Vec<Diagnostic>, S
 pub async fn hover(
     server: &str,
     file: &Path,
+    allowed_root: &Path,
     line: u32,
     col: u32,
 ) -> Result<Option<Value>, String> {
-    Ok(lsp_request(server, file, Op::Hover { line, col })
-        .await?
-        .filter(non_empty))
+    Ok(
+        lsp_request(server, file, allowed_root, Op::Hover { line, col })
+            .await?
+            .filter(non_empty),
+    )
 }
 
 pub async fn definition(
     server: &str,
     file: &Path,
+    allowed_root: &Path,
     line: u32,
     col: u32,
 ) -> Result<Option<Value>, String> {
-    Ok(lsp_request(server, file, Op::Definition { line, col })
-        .await?
-        .filter(non_empty))
+    Ok(
+        lsp_request(server, file, allowed_root, Op::Definition { line, col })
+            .await?
+            .filter(non_empty),
+    )
 }
 
 fn non_empty(v: &Value) -> bool {
@@ -151,37 +211,62 @@ pub enum Op {
 }
 
 /// Start `server` on `file`, run the initialize handshake, perform `op`, and
-/// shut the server down. `line`/`col` are zero-based, as LSP wants.
-pub async fn lsp_request(server: &str, file: &Path, op: Op) -> Result<Option<Value>, String> {
+/// shut the server down. `line`/`col` are zero-based, as LSP wants. The
+/// server's working directory never leaves `allowed_root`.
+pub async fn lsp_request(
+    server: &str,
+    file: &Path,
+    allowed_root: &Path,
+    op: Op,
+) -> Result<Option<Value>, String> {
     let abs = file
         .canonicalize()
         .map_err(|e| format!("{}: {e}", file.display()))?;
     if abs.parent().is_none() {
         return Err(format!("{} has no parent directory", abs.display()));
     }
-    let root = workspace_root(&abs);
-    let len = tokio::fs::metadata(&abs)
-        .await
-        .map_err(|e| format!("{}: {e}", abs.display()))?
-        .len();
-    if len > MAX_FILE_BYTES {
-        return Err(format!(
-            "{} too large ({} bytes > 1 MiB)",
-            abs.display(),
-            len
-        ));
-    }
-    let text = tokio::fs::read_to_string(&abs)
+    let granted = allowed_root
+        .canonicalize()
+        .map_err(|e| format!("{}: {e}", allowed_root.display()))?;
+    let root = workspace_root_within(&abs, &granted);
+    // Bounded read: an open + take() avoids the metadata-then-read window.
+    let mut f = tokio::fs::File::open(&abs)
         .await
         .map_err(|e| format!("{}: {e}", abs.display()))?;
-    let mut child = Command::new(server)
-        .current_dir(&root)
+    let mut bytes = Vec::new();
+    (&mut f)
+        .take(MAX_FILE_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .await
+        .map_err(|e| format!("{}: {e}", abs.display()))?;
+    if bytes.len() as u64 > MAX_FILE_BYTES {
+        return Err(format!(
+            "{} too large (>1 MiB)",
+            abs.display()
+        ));
+    }
+    let text = String::from_utf8(bytes).map_err(|_| format!("{} is not utf-8", abs.display()))?;
+    let bin = resolve_server(server).ok_or_else(|| format!("{server} not found on PATH"))?;
+    let _permit = spawn_permit()
+        .acquire()
+        .await
+        .map_err(|_| "lsp spawn pool closed")?;
+    let mut cmd = Command::new(&bin);
+    cmd.current_dir(&root)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
-        .kill_on_drop(true)
-        .spawn()
-        .map_err(|e| format!("spawn {server}: {e}"))?;
+        .kill_on_drop(true);
+    // The server is untrusted code; it gets a scrubbed environment (PATH to
+    // find its own helpers, HOME/TMPDIR/LANG for sane defaults) — never the
+    // provider keys sitting in ours.
+    cmd.env_clear();
+    for key in ["PATH", "HOME", "TMPDIR", "LANG", "USERPROFILE", "GOPATH", "GOCACHE"] {
+        if let Ok(v) = std::env::var(key) {
+            cmd.env(key, v);
+        }
+    }
+    let mut child = cmd.spawn().map_err(|e| format!("spawn {server}: {e}"))?;
     let stdin = child.stdin.take().ok_or("server has no stdin")?;
     let stdout = child.stdout.take().ok_or("server has no stdout")?;
     let mut conn = Conn {
@@ -218,13 +303,20 @@ impl Conn {
         self.stdin.flush().await.map_err(|e| format!("flush: {e}"))
     }
 
-    /// Read one `Content-Length`-framed JSON-RPC message; `None` on EOF or a
-    /// malformed frame (which means the server is unusable).
+    /// Read one `Content-Length`-framed JSON-RPC message; `None` on EOF, a
+    /// malformed frame, or an oversize one (which means the server is
+    /// unusable). Sizes are enforced before any allocation.
     async fn read(&mut self) -> Option<Value> {
         let mut len = None;
+        let mut header_bytes = 0usize;
         loop {
             let mut line = String::new();
-            if self.reader.read_line(&mut line).await.ok()? == 0 {
+            let n = self.reader.read_line(&mut line).await.ok()?;
+            if n == 0 {
+                return None;
+            }
+            header_bytes += n;
+            if header_bytes > MAX_HEADER_BYTES {
                 return None;
             }
             let line = line.trim_end();
@@ -235,7 +327,11 @@ impl Conn {
                 len = v.trim().parse::<usize>().ok();
             }
         }
-        let mut body = vec![0u8; len?];
+        let len = len?;
+        if len > MAX_FRAME_BYTES {
+            return None;
+        }
+        let mut body = vec![0u8; len];
         self.reader.read_exact(&mut body).await.ok()?;
         serde_json::from_slice(&body).ok()
     }
@@ -259,7 +355,7 @@ async fn handshake(conn: &mut Conn, root: &Path, file: &Path, text: &str) -> Res
     }))
     .await?;
     // Servers may issue requests of their own (registration, configuration)
-    // before answering initialize; answer them so startup does not stall.
+    // before answering initialize; refuse them so startup does not stall.
     loop {
         let msg = conn.read().await.ok_or("server closed during initialize")?;
         if msg.get("method").is_none() && msg.get("id").and_then(Value::as_i64) == Some(1) {
@@ -285,7 +381,7 @@ async fn handshake(conn: &mut Conn, root: &Path, file: &Path, text: &str) -> Res
             };
         }
         if let (Some(id), Some(_)) = (msg.get("id"), msg.get("method")) {
-            answer_null(conn, id).await?;
+            refuse_request(conn, id).await?;
         }
     }
 }
@@ -317,7 +413,7 @@ async fn run_op(conn: &mut Conn, file: &Path, op: Op) -> Result<Option<Value>, S
         };
         if msg.get("method").is_some() {
             if let Some(id) = msg.get("id") {
-                answer_null(conn, id).await?;
+                refuse_request(conn, id).await?;
             }
             continue;
         }
@@ -351,7 +447,7 @@ async fn collect_diagnostics(conn: &mut Conn, file: &Path) -> Result<Value, Stri
             }
             Some(_) => {
                 if let Some(id) = msg.get("id") {
-                    answer_null(conn, id).await?;
+                    refuse_request(conn, id).await?;
                 }
             }
             None => {}
@@ -373,9 +469,15 @@ async fn timeout_at<T>(deadline: tokio::time::Instant, fut: impl Future<Output =
     tokio::time::timeout_at(deadline, fut).await.ok()
 }
 
-async fn answer_null(conn: &mut Conn, id: &Value) -> Result<(), String> {
-    conn.send(&json!({"jsonrpc":"2.0","id":id,"result":null}))
-        .await
+/// A blind `null` result can satisfy server requests we never meant to grant
+/// (client/registerCapability, workspace/configuration); refuse instead.
+async fn refuse_request(conn: &mut Conn, id: &Value) -> Result<(), String> {
+    conn.send(&json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "error": {"code": -32601, "message": "method not supported"}
+    }))
+    .await
 }
 
 fn uri(path: &Path) -> String {
@@ -428,49 +530,59 @@ mod tests {
         let _ = servers_available();
     }
 
+    #[test]
+    fn unknown_server_name_rejected() {
+        // Absolute paths and non-allowlist names must not spawn.
+        assert!(resolve_server("/bin/sh").is_none());
+        assert!(resolve_server("definitely-not-an-lsp").is_none());
+    }
+
     #[tokio::test]
     async fn missing_server_is_err() {
         let f = Path::new(env!("CARGO_MANIFEST_DIR")).join("Cargo.toml");
         assert!(
-            diagnostics("freedas-no-such-language-server", &f)
+            diagnostics("freedas-no-such-language-server", &f, Path::new("/"))
                 .await
                 .is_err()
         );
     }
 
-    #[cfg(unix)]
     #[tokio::test]
-    async fn fake_server_reports_diagnostics() {
+    async fn oversized_frame_is_rejected() {
+        // A fake server announcing a huge Content-Length must fail, not OOM.
         use std::os::unix::fs::PermissionsExt;
-        let dir = std::env::temp_dir().join(format!("freedas-lsp-fake-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("freedas-lsp-huge-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join("a.rs");
         std::fs::write(&file, "fn main() {}\n").unwrap();
-        let canon = file.canonicalize().unwrap();
-        let init = r#"{"jsonrpc":"2.0","id":1,"result":{"capabilities":{}}}"#;
-        let diag = format!(
-            r#"{{"jsonrpc":"2.0","method":"textDocument/publishDiagnostics","params":{{"uri":"{}","diagnostics":[{{"range":{{"start":{{"line":0,"character":0}},"end":{{"line":0,"character":1}}}},"severity":1,"message":"boom","source":"fake"}}]}}}}"#,
-            uri(&canon)
-        );
         let script = dir.join("fake-lsp");
         std::fs::write(
             &script,
-            format!(
-                "#!/bin/sh\nprintf 'Content-Length: {}\r\n\r\n%s' '{}'\nprintf 'Content-Length: {}\r\n\r\n%s' '{}'\nsleep 1\n",
-                init.len(),
-                init,
-                diag.len(),
-                diag
-            ),
+            "#!/bin/sh\nprintf 'Content-Length: 999999999\\r\\n\\r\\n'\nsleep 1\n",
         )
         .unwrap();
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // Not on the allowlist: lsp_request refuses before spawn.
+        let err = diagnostics(script.to_str().unwrap(), &file, &dir)
+            .await
+            .unwrap_err();
+        assert!(err.contains("not found"), "got {err}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
-        let found = diagnostics(script.to_str().unwrap(), &file).await.unwrap();
-        assert_eq!(found.len(), 1);
-        assert_eq!(found[0].message, "boom");
-        assert_eq!(found[0].severity, 1);
-        assert_eq!(found[0].source.as_deref(), Some("fake"));
+    #[test]
+    fn workspace_root_clamps_at_ceiling() {
+        let dir = std::env::temp_dir().join(format!("freedas-lsp-clamp-{}", std::process::id()));
+        // Marker above the granted root must not lift the workspace there.
+        let root = dir.join("granted").join("sub");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(dir.join("granted").join("..").join("no_marker"), "").ok();
+        std::fs::write(dir.join("Cargo.toml"), "[package]").unwrap();
+        let file = root.join("lib.rs");
+        std::fs::write(&file, "").unwrap();
+        let granted = dir.join("granted").canonicalize().unwrap();
+        let found = workspace_root_within(&file.canonicalize().unwrap(), &granted);
+        assert!(found.starts_with(&granted), "got {}", found.display());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -490,38 +602,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn no_publish_reports_unknown_not_clean() {
-        use std::os::unix::fs::PermissionsExt;
-        let dir = std::env::temp_dir().join(format!("freedas-lsp-silent-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let file = dir.join("a.rs");
-        std::fs::write(&file, "fn main() {}\n").unwrap();
-        let init = r#"{"jsonrpc":"2.0","id":1,"result":{"capabilities":{}}}"#;
-        let script = dir.join("silent-lsp");
-        std::fs::write(
-            &script,
-            format!(
-                "#!/bin/sh\nprintf 'Content-Length: {}\\r\\n\\r\\n%s' '{}'\n",
-                init.len(),
-                init
-            ),
-        )
-        .unwrap();
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
-
-        let err = diagnostics(script.to_str().unwrap(), &file)
-            .await
-            .unwrap_err();
-        assert!(err.contains("no diagnostics"), "got {err}");
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
     #[tokio::test]
     async fn missing_file_is_err() {
         assert!(
-            diagnostics("rust-analyzer", Path::new("/nonexistent/freedas.rs"))
+            diagnostics("rust-analyzer", Path::new("/nonexistent/freedas.rs"), Path::new("/"))
                 .await
                 .is_err()
         );

@@ -13,8 +13,9 @@ const DEFAULT_REQUEST_TIMEOUT_MS: u64 = 30_000;
 const CALLBACK_TIMEOUT_MS: u64 = 300_000;
 
 /// Credentials minted by an OAuth-style login. Serialized verbatim into
-/// `oauth.json`; optional fields capture per-provider identity.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+/// `oauth.json`; optional fields capture per-provider identity. `Debug` is
+/// hand-implemented so `{:?}` logging can never persist the durable tokens.
+#[derive(Clone, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct OAuthCredentials {
     pub access: String,
@@ -44,14 +45,40 @@ pub struct OAuthCredentials {
     pub authorized_at: Option<i64>,
 }
 
+impl std::fmt::Debug for OAuthCredentials {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OAuthCredentials")
+            .field("access", &"[redacted]")
+            .field("refresh", &"[redacted]")
+            .field("expires", &self.expires)
+            .field("enterprise_url", &self.enterprise_url)
+            .field("project_id", &self.project_id)
+            .field("email", &self.email)
+            .field("account_id", &self.account_id)
+            .field("org_id", &self.org_id)
+            .field("org_name", &self.org_name)
+            .field("region", &self.region)
+            .field("authorized_at", &self.authorized_at)
+            .finish_non_exhaustive()
+    }
+}
+
 /// What a login produced: a durable API key or a refreshable OAuth grant.
 /// The grant payload is a few hundred bytes and is returned by value once per
 /// login, so the enum is deliberately not boxed.
 #[allow(clippy::large_enum_variant)]
-#[derive(Debug)]
 pub enum LoginResult {
     ApiKey(String),
     OAuth(OAuthCredentials),
+}
+
+impl std::fmt::Debug for LoginResult {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            LoginResult::ApiKey(_) => f.debug_tuple("ApiKey").field(&"[redacted]").finish(),
+            LoginResult::OAuth(c) => f.debug_tuple("OAuth").field(c).finish(),
+        }
+    }
 }
 
 pub type AuthCallback<'a> = dyn FnMut(&str, Option<&str>, Option<&str>) + Send + Sync + 'a;
@@ -1769,8 +1796,18 @@ async fn validate_chat_completions(
     Err(if details.is_empty() {
         format!("{label} API key validation failed ({status})")
     } else {
-        format!("{label} API key validation failed ({status}): {details}")
+        format!(
+            "{label} API key validation failed ({status}): {}",
+            validation_details(&details)
+        )
     })
+}
+
+/// Error bodies from a (possibly compromised) endpoint can carry reflected
+/// secrets or arbitrary text; redact key-like substrings and cap the size
+/// before they reach the UI or an export.
+fn validation_details(body: &str) -> String {
+    crate::truncate_body(&freedas_core::redact::redact(body))
 }
 
 async fn validate_anthropic_messages(
@@ -1803,7 +1840,10 @@ async fn validate_anthropic_messages(
     Err(if details.is_empty() {
         format!("{label} API key validation failed ({status})")
     } else {
-        format!("{label} API key validation failed ({status}): {details}")
+        format!(
+            "{label} API key validation failed ({status}): {}",
+            validation_details(&details)
+        )
     })
 }
 
@@ -1829,7 +1869,10 @@ async fn validate_models_endpoint(
     Err(if details.is_empty() {
         format!("{label} API key validation failed ({status})")
     } else {
-        format!("{label} API key validation failed ({status}): {details}")
+        format!(
+            "{label} API key validation failed ({status}): {}",
+            validation_details(&details)
+        )
     })
 }
 

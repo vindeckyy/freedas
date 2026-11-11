@@ -24,10 +24,13 @@ type ApiError = (StatusCode, Json<Value>);
 type ApiResult = Result<Json<Value>, ApiError>;
 
 fn internal(error: impl std::fmt::Display) -> ApiError {
-    eprintln!("freedas server: {error}");
+    // Detail stays server-side behind a correlation id; internals never
+    // reach the client.
+    let id = ulid::Ulid::new().to_string();
+    eprintln!("freedas server: [{id}] {error}");
     (
         StatusCode::INTERNAL_SERVER_ERROR,
-        Json(json!({"error": error.to_string()})),
+        Json(json!({"error": "internal error", "id": id})),
     )
 }
 
@@ -210,14 +213,14 @@ fn env_nonempty(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|v| !v.is_empty())
 }
 
-/// Length-checked constant-time string compare.
+/// Constant-time compare over SHA-256 digests: comparing hashes hides the
+/// expected length that a byte-wise compare would leak through timing.
 fn ct_eq(a: &str, b: &str) -> bool {
-    let (a, b) = (a.as_bytes(), b.as_bytes());
-    if a.len() != b.len() {
-        return false;
-    }
+    use sha2::Digest;
+    let da = sha2::Sha256::digest(a.as_bytes());
+    let db = sha2::Sha256::digest(b.as_bytes());
     let mut diff = 0u8;
-    for (x, y) in a.iter().zip(b) {
+    for (x, y) in da.iter().zip(db.iter()) {
         diff |= x ^ y;
     }
     diff == 0
@@ -231,10 +234,14 @@ fn is_loopback_host(host: &str) -> bool {
 }
 
 /// Reject a `Host` header that does not name loopback while the server is
-/// bound to loopback. A missing header (HTTP/1.0, tests) is allowed.
+/// bound to loopback. A missing header is suspect too (the rebinding defense
+/// only exists for browser-shaped requests, and browsers always send Host);
+/// `FREEDAS_SERVER_ALLOW_MISSING_HOST=1` restores the old behavior for
+/// HTTP/1.0 clients that cannot send one.
 fn host_allowed(headers: &HeaderMap) -> bool {
     let Some(host) = headers.get(header::HOST).and_then(|v| v.to_str().ok()) else {
-        return true;
+        return std::env::var("FREEDAS_SERVER_ALLOW_MISSING_HOST")
+            .is_ok_and(|v| v == "1");
     };
     let host = host.rsplit_once(':').map(|(h, _)| h).unwrap_or(host);
     is_loopback_host(host)
@@ -254,6 +261,7 @@ async fn authorize(
                 .into_response();
         }
         if auth.enabled() && !auth.authorized(req.headers()) {
+            auth_failure_backoff().await;
             let mut response = (
                 StatusCode::UNAUTHORIZED,
                 Json(json!({"error": "unauthorized"})),
@@ -266,7 +274,27 @@ async fn authorize(
             return response;
         }
     }
+    if auth.enabled() && auth.authorized(req.headers()) {
+        auth_success();
+    }
     next.run(req).await
+}
+
+fn auth_success() {
+    AUTH_FAILS.store(0, Ordering::Relaxed);
+}
+
+static AUTH_FAILS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+use std::sync::atomic::Ordering;
+
+/// Bounded brute-force defense: consecutive auth failures back the response
+/// off exponentially (100ms → 3.2s cap) and are logged without credential
+/// material. A successful auth resets the counter.
+async fn auth_failure_backoff() {
+    let n = AUTH_FAILS.fetch_add(1, Ordering::Relaxed).min(5);
+    let delay = std::time::Duration::from_millis(100u64 << n);
+    eprintln!("freedas server: auth failure #{}", n + 1);
+    tokio::time::sleep(delay).await;
 }
 
 /// A permission request parked until a client answers: the session id and the
@@ -374,13 +402,26 @@ pub fn app(db: Arc<Db>, paths: Paths) -> Router {
     app_with_auth(db, paths, Auth::from_env(false))
 }
 
+/// The SPA with hardening headers: no framing, no sniffing, no referer, no
+/// cache (the page embeds session views that should not persist on disk).
+async fn spa() -> impl axum::response::IntoResponse {
+    (
+        [
+            (header::CONTENT_SECURITY_POLICY.as_str(), "default-src 'self'; connect-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'self'; frame-ancestors 'none'"),
+            (header::X_CONTENT_TYPE_OPTIONS.as_str(), "nosniff"),
+            (header::REFERRER_POLICY.as_str(), "no-referrer"),
+            (header::CACHE_CONTROL.as_str(), "no-store"),
+            ("x-frame-options", "DENY"),
+        ],
+        axum::response::Html(freedas_web::INDEX_HTML),
+    )
+}
+
 pub fn app_with_auth(db: Arc<Db>, paths: Paths, auth: Auth) -> Router {
     let state = AppState::new(db, paths);
     Router::new()
-        .route(
-            "/",
-            get(|| async { axum::response::Html(freedas_web::INDEX_HTML) }),
-        )
+        .route("/", get(spa))
+
         .route("/global/health", get(health))
         .route("/doc", get(openapi_doc))
         .route("/project", get(list_projects))
@@ -445,6 +486,15 @@ pub fn app_with_auth(db: Arc<Db>, paths: Paths, auth: Auth) -> Router {
 fn project_config_disabled() -> bool {
     std::env::var("FREEDAS_DISABLE_PROJECT_CONFIG")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
+/// Whether `.freedas/commands` and similar repo-sourced content may load:
+/// honors `trust_project_code` and `FREEDAS_TRUST_PROJECT_CODE`, defaulting
+/// to untrusted when config cannot be read.
+fn project_content_trusted(s: &AppState) -> bool {
+    freedas_core::config::load(&s.paths, project_config_disabled())
+        .map(|c| c.trust_project_code)
         .unwrap_or(false)
 }
 
@@ -562,7 +612,7 @@ async fn rename_session(
 async fn list_messages(State(s): State<AppState>, AxumPath(id): AxumPath<String>) -> ApiResult {
     let mut out = Vec::new();
     for m in s.db.list_messages(&id).map_err(internal)? {
-        let parts = s.db.list_parts(&m.id).map_err(internal)?;
+        let parts = s.db.list_parts(&id, &m.id).map_err(internal)?;
         let metadata: Value = serde_json::from_str(&m.metadata).unwrap_or(Value::Null);
         out.push(json!({
             "info": {
@@ -903,7 +953,11 @@ async fn revert_session(State(s): State<AppState>, AxumPath(id): AxumPath<String
                 "restored": sha,
                 "removedMessages": removed,
             }));
-            Ok(Json(json!({"restored": sha, "removedMessages": removed})))
+            Ok(Json(json!({
+                "restored": sha,
+                "removedMessages": removed,
+                "note": "files created after the snapshot were removed; redo restores them until the next message",
+            })))
         }
         Err(e) => Err(internal(e)),
     }
@@ -1153,10 +1207,13 @@ async fn list_agents() -> Json<Value> {
 
 async fn list_commands(State(s): State<AppState>) -> Json<Value> {
     let mut out = Vec::new();
+    let trusted = project_content_trusted(&s);
     let dirs = [
-        s.paths.project_root.join(".freedas").join("commands"),
-        s.paths.config_dir.join("commands"),
-    ];
+        trusted.then(|| s.paths.project_root.join(".freedas").join("commands")),
+        Some(s.paths.config_dir.join("commands")),
+    ]
+    .into_iter()
+    .flatten();
     for dir in dirs {
         if let Ok(entries) = std::fs::read_dir(&dir) {
             for e in entries.flatten() {
@@ -1234,10 +1291,14 @@ async fn post_command(
 ) -> ApiResult {
     // Resolve the named command the same way /command lists it.
     let mut resolved: Option<ResolvedCommand> = None;
+    let trusted = project_content_trusted(&s);
     for dir in [
-        s.paths.project_root.join(".freedas").join("commands"),
-        s.paths.config_dir.join("commands"),
-    ] {
+        trusted.then(|| s.paths.project_root.join(".freedas").join("commands")),
+        Some(s.paths.config_dir.join("commands")),
+    ]
+    .into_iter()
+    .flatten()
+    {
         if let Ok(entries) = std::fs::read_dir(&dir) {
             for e in entries.flatten() {
                 let p = e.path();
@@ -1298,6 +1359,30 @@ async fn post_command(
     } else {
         id.clone()
     };
+    // Frontmatter routing fields must resolve before they are applied; a
+    // typo or bogus id in a command file must not reroute the run.
+    let agent = match &command.agent {
+        Some(a)
+            if freedas_agent::find(
+                &freedas_agent::merged_agents(&s.paths.project_root, trusted),
+                a,
+            )
+            .is_some() =>
+        {
+            command.agent.clone()
+        }
+        Some(a) => {
+            return Err(bad_request(format!("unknown agent '{a}' in command {}", body.name)));
+        }
+        None => None,
+    };
+    let model = match &command.model {
+        Some(m) if freedas_core::config::check_model(m).is_ok() => command.model.clone(),
+        Some(m) => {
+            return Err(bad_request(format!("invalid model '{m}' in command {}", body.name)));
+        }
+        None => None,
+    };
     spawn_run(
         &s,
         target.clone(),
@@ -1305,8 +1390,8 @@ async fn post_command(
             text,
             auto: false,
             manual: false,
-            agent: command.agent,
-            model: command.model,
+            agent,
+            model,
             variant: None,
         },
     )?;
@@ -1403,6 +1488,11 @@ pub async fn serve_with_cors(host: &str, port: u16, origins: Vec<String>) -> std
     let listener = tokio::net::TcpListener::bind((host, port)).await?;
     let addr = listener.local_addr()?;
     let auth = Auth::from_env(is_loopback_host(host));
+    if !is_loopback_host(host) {
+        eprintln!(
+            "freedas server: WARNING plain HTTP on a non-loopback bind sends the Bearer token in cleartext; put a TLS-terminating proxy or SSH tunnel in front"
+        );
+    }
     let app = app_with_auth(db, paths, auth).layer(axum::middleware::from_fn(
         move |req: axum::extract::Request, next: axum::middleware::Next| {
             let origins = origins.clone();
@@ -1447,6 +1537,11 @@ pub async fn serve(host: &str, port: u16) -> std::io::Result<()> {
     let db = Arc::new(Db::open(&paths.db_path()).expect("open db"));
     let listener = tokio::net::TcpListener::bind((host, port)).await?;
     let addr = listener.local_addr()?;
+    if !is_loopback_host(host) {
+        eprintln!(
+            "freedas server: WARNING plain HTTP on a non-loopback bind sends the Bearer token in cleartext; put a TLS-terminating proxy or SSH tunnel in front"
+        );
+    }
     let app = app_with_auth(db, paths, Auth::from_env(is_loopback_host(host)));
     println!("freedas server on http://{addr}");
     axum::serve(listener, app).await
@@ -1483,6 +1578,9 @@ mod tests {
         headers: &[(&str, &str)],
     ) -> (StatusCode, Value) {
         let mut builder = axum::http::Request::builder().method(method).uri(uri);
+        if !headers.iter().any(|(k, _)| k.eq_ignore_ascii_case("host")) {
+            builder = builder.header("host", "127.0.0.1:4096");
+        }
         for (key, value) in headers {
             builder = builder.header(*key, *value);
         }
@@ -2328,6 +2426,66 @@ async fn set_auth(
     Ok(Json(json!({"ok": true, "id": id})))
 }
 
+/// Remote MCP endpoints must be https and resolve to public addresses;
+/// loopback/link-local/RFC1918 and cloud-metadata targets are refused.
+/// Plain http is allowed only for literal loopback hosts.
+async fn mcp_url_allowed(url: &str) -> Result<(), String> {
+    let u = reqwest::Url::parse(url).map_err(|e| format!("mcp url: {e}"))?;
+    let host = u.host_str().ok_or("mcp url has no host")?;
+    match u.scheme() {
+        "https" => {}
+        "http" if is_loopback_host(host) => return Ok(()),
+        scheme => return Err(format!("mcp url scheme {scheme:?} is not https")),
+    }
+    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+        if !ip_is_public(&ip) {
+            return Err(format!("mcp url host {ip} is not a public address"));
+        }
+        return Ok(());
+    }
+    // Resolve and require every answer to be public so DNS cannot split the
+    // check from the dial.
+    let port = u.port_or_known_default().unwrap_or(443);
+    let addrs = tokio::net::lookup_host((host, port))
+        .await
+        .map_err(|e| format!("mcp url host does not resolve: {e}"))?;
+    let mut any = false;
+    for addr in addrs {
+        if !ip_is_public(&addr.ip()) {
+            return Err(format!("mcp url host resolves to {}", addr.ip()));
+        }
+        any = true;
+    }
+    if !any {
+        return Err("mcp url host has no addresses".into());
+    }
+    Ok(())
+}
+
+fn ip_is_public(ip: &std::net::IpAddr) -> bool {
+    use std::net::IpAddr;
+    match ip {
+        IpAddr::V4(v4) => {
+            let o = v4.octets();
+            !(v4.is_loopback()
+                || v4.is_private()
+                || v4.is_link_local()
+                || v4.is_broadcast()
+                || v4.is_documentation()
+                || o[0] == 0
+                || (o[0] == 169 && o[1] == 254) // link-local + cloud metadata
+                || (o[0] == 100 && (64..=127).contains(&o[1]))) // CGNAT
+        }
+        IpAddr::V6(v6) => {
+            !(v6.is_loopback()
+                || v6.is_unspecified()
+                || v6.is_multicast()
+                || (v6.segments()[0] & 0xfe00) == 0xfc00 // fc00::/7 ULA
+                || (v6.segments()[0] & 0xffc0) == 0xfe80) // fe80::/10 link-local
+        }
+    }
+}
+
 #[derive(Deserialize)]
 struct AddMcp {
     name: String,
@@ -2340,6 +2498,11 @@ struct AddMcp {
 async fn add_mcp(State(s): State<AppState>, Json(body): Json<AddMcp>) -> ApiResult {
     if body.name.trim().is_empty() {
         return Err(bad_request("name required"));
+    }
+    // A registered URL makes the server dial it; refuse endpoints that point
+    // at internal infrastructure before the config is written.
+    if let Some(url) = body.config.get("url").and_then(Value::as_str) {
+        mcp_url_allowed(url).await.map_err(bad_request)?;
     }
     let _guard = s.config_lock.lock().await;
     let root = &s.paths.project_root;

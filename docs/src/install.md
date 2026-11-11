@@ -11,11 +11,12 @@ curl -fsSL https://raw.githubusercontent.com/freedas/freedas/main/install.sh | b
 
 The script:
 
-1. Detects your OS and architecture (`darwin`/`linux`, `arm64`/`x86_64`); anything else fails with `unsupported OS` or `unsupported architecture`.
-2. Downloads `freedas-<os>-<arch>.tar.gz` from the release page at `https://github.com/freedas/freedas/releases` (override with `FREEDAS_RELEASE_BASE`, which also accepts a `file://` directory for local testing).
-3. Extracts and installs the binary to `~/.freedas/bin/freedas` (override with `PREFIX` as the first argument; `FREEDAS_VERSION` picks a release tag, default `latest`).
-4. Adds `~/.freedas/bin` to your shell profile (`.zshrc`, `.bash_profile`, `.bashrc`, or fish `config.fish`) if it is not already there.
-5. Adds an `fd` shell function to the same profile so `fd` opens the TUI even when fd-find is on `PATH`. Use `command fd` for fd-find.
+1. Detects your OS and architecture (`darwin`/`linux`, `arm64`/`x86_64`); anything else fails with `unsupported OS` or `unsupported architecture`. Only glibc Linux assets ship — musl hosts (Alpine) get a clear error telling you to build from source.
+2. Downloads `freedas-<os>-<arch>.tar.gz` from the release page at `https://github.com/freedas/freedas/releases` (override with `FREEDAS_RELEASE_BASE`, which must be `https://` or `file://`; curl is pinned to those protocols and `https`-only redirects).
+3. Refuses to install without a published checksum: the asset's `.sha256` or `SHA256SUMS` must exist and match. When `cosign` is installed and the release ships a `.sig`, the signature is verified too (warns otherwise; `FREEDAS_INSTALL_SKIP_SIG=1` silences the check entirely).
+4. Extracts with `--no-absolute-filenames` and requires exactly one `freedas` binary, then installs to `~/.freedas/bin/freedas` (override with `PREFIX` as the first argument — restricted to safe path characters since it is written into your shell rc file; `FREEDAS_VERSION` picks a release tag, default `latest`).
+5. Adds `~/.freedas/bin` to your shell profile (`.zshrc`, `.bash_profile`, `.bashrc`, or fish `config.fish`) if it is not already there.
+6. Adds an `fd` shell function to the same profile so `fd` opens the TUI even when fd-find is on `PATH`. Use `command fd` for fd-find.
 
 No sudo. Open a new terminal afterward, or `source` your profile.
 
@@ -24,7 +25,7 @@ No sudo. Open a new terminal afterward, or `source` your profile.
 ```bash
 git clone https://github.com/freedas/freedas.git
 cd freedas
-cargo build --release
+cargo build --locked --release
 cp target/release/freedas ~/.freedas/bin/freedas
 ```
 

@@ -1418,6 +1418,7 @@ dependencies = [
  "hex",
  "jsonc-parser",
  "reqwest 0.12.28",
+ "rpassword",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -1432,6 +1433,7 @@ name = "freedas-acp"
 version = "0.1.0"
 dependencies = [
  "agent-client-protocol",
+ "freedas-agent",
  "freedas-catalog",
  "freedas-core",
  "freedas-db",
@@ -1507,6 +1509,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "jsonc-parser",
+ "libc",
  "regex",
  "rusqlite",
  "secrecy",
@@ -1527,6 +1530,7 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
+ "sha2 0.11.1",
  "tempfile",
  "thiserror 2.0.21",
  "ulid",
@@ -1696,6 +1700,7 @@ dependencies = [
  "tokio",
  "tokio-tungstenite 0.28.0",
  "tower",
+ "ulid",
 ]
 
 [[package]]
@@ -1781,6 +1786,7 @@ dependencies = [
  "reqwest 0.12.28",
  "serde",
  "serde_json",
+ "sha2 0.10.9",
  "tempfile",
  "tokio",
  "tokio-util",
@@ -4222,6 +4228,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "rpassword"
+version = "7.5.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1fa2c5d9304b618df61ff17f3d3485c6e1854a3d94902a49abbb8d43dfbe0464"
+dependencies = [
+ "libc",
+ "rtoolbox",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
 name = "rquickjs"
 version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4257,6 +4274,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "353b74f9810d5b085b6c42c9d86a5f0fdb795553235cdd48753b32e3809d18a7"
 dependencies = [
  "thiserror 2.0.21",
+]
+
+[[package]]
+name = "rtoolbox"
+version = "0.0.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9a1efe12a1469752d0e6ff5ebec0b6ef4924cc5c4c71046b0ec730040535819d"
+dependencies = [
+ "libc",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

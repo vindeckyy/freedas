@@ -12,12 +12,15 @@ Lowest to highest:
 2. System config: `/etc/freedas/freedas.json`, then `.jsonc`.
 3. Global config: `~/.config/freedas/freedas.json`, then `.jsonc`.
 4. Cached organization settings (`<cache>/org-settings.json`, written by `freedas workspace list|use` and `/org`).
-5. Project config: `freedas.json`, then `freedas.jsonc`, in each ancestor directory from farthest down to the project dir, then the `.freedas/` versions of those files in the same order.
+5. Project config: `freedas.json`, then `freedas.jsonc`, then the `.freedas/` versions — in the project directory only. `FREEDAS_CONFIG_ANCESTORS=1` additionally walks every ancestor directory to `/` (farthest first, same order); it stays opt-in because a writable parent directory could otherwise plant config.
 6. Environment overrides.
 7. CLI flags.
 
 `FREEDAS_DISABLE_PROJECT_CONFIG=1` skips step 5. `FREEDAS_CONFIG`
-replaces steps 2-5 with one file.
+replaces steps 2-5 with one file. In an untrusted project layer,
+`trust_project_code` (always), `server`, `sandbox`, `standards`,
+`permission_mode: bypass`, and `{env:}`/`{file:}` under sensitive keys are
+ignored until `trust_project_code` is set in a global layer.
 
 Merge rules: objects deep-merge; arrays (such as `instructions`, `skills`,
 `plugin`) concatenate; scalars replace; `permission` rules append so the last
@@ -40,7 +43,7 @@ Every top-level key, with its type and default:
 | `model` | string | `freedas/auto` | `freedas/auto`, `freedas/auto-cheap`, or `provider/model` |
 | `small_model` | string | `freedas/auto-cheap` | Model for titles, compaction, distillation |
 | `variant` | string | none | Reasoning variant |
-| `permission_mode` | `bypass\|auto\|ask` | `bypass` | How asks resolve (see [Permissions](./permissions.md)) |
+| `permission_mode` | `bypass\|auto\|ask` | `auto` | How asks resolve (see [Permissions](./permissions.md)) |
 | `default_agent` | string | `build` | Initial primary agent |
 | `subagent_depth` | number | `1` | `task` nesting limit |
 | `disabled_providers` | array | `[]` | Providers hidden from the catalog and router |
@@ -51,7 +54,7 @@ Every top-level key, with its type and default:
 | `memory.profile` | bool | `true` | Standing profile block |
 | `memory.recall.limit` | number | `8` | Max recalled records per turn |
 | `memory.distill.enabled` | bool | `true` | Distill records at session end |
-| `router.mode` | string | `auto` | Reserved; selection is per-step |
+| `router.mode` | `auto\|static\|off` | `auto` | `static` routes without learned priors; `off` bypasses the router |
 | `router.quality_floor` | number | `0.80` | Base quality floor |
 | `router.max_escalations` | number | `2` | Floor raises on consecutive failures |
 | `router.learn` | bool | `true` | Blend learned outcomes, allow exploration |

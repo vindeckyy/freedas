@@ -18,6 +18,12 @@ Start a session on another agent with `--agent <id>`, `/agents`, or `Tab`.
 
 ## Custom agents
 
+Project agents only load when the project layer is trusted: set
+`trust_project_code` in a global config (or `FREEDAS_TRUST_PROJECT_CODE=1`)
+or they are ignored. A project file also cannot disable a built-in, change a
+built-in's `mode` to anything but `subagent`, pin `model`, or deny more than
+its own rules subsume.
+
 A custom agent is a Markdown file in `.freedas/agents/` (project) or
 `~/.config/freedas/agents/` (global). Nested paths become IDs
 (`team/reviewer.md` → `team/reviewer`). The body is the system prompt;

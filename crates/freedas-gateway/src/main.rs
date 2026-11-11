@@ -10,12 +10,8 @@ use clap::Parser;
 )]
 struct Cli {
     /// Upstream OpenAI-compatible base URL.
-    #[arg(
-        long,
-        env = "FREEDAS_UPSTREAM_URL",
-        default_value = "https://api.openai.com/v1"
-    )]
-    upstream: String,
+    #[arg(long)]
+    upstream: Option<String>,
     /// Postgres connection string for token auth, budget checks, and usage
     /// metering. Required unless `--insecure-no-auth` is passed.
     #[arg(long, env = "DATABASE_URL")]
@@ -51,7 +47,22 @@ async fn main() -> anyhow::Result<()> {
         None => None,
     };
 
-    let mut state = freedas_gateway::AppState::new(cli.upstream.clone(), pool.clone());
+    // Flag wins, then the canonical env var, then the legacy name (warned),
+    // then the compiled default — one precedence chain in one place.
+    let upstream = cli
+        .upstream
+        .or_else(|| std::env::var("FREEDAS_GATEWAY_UPSTREAM").ok())
+        .or_else(|| {
+            std::env::var("FREEDAS_UPSTREAM_URL")
+                .ok()
+                .inspect(|_| {
+                    eprintln!(
+                        "warning: FREEDAS_UPSTREAM_URL is deprecated; use FREEDAS_GATEWAY_UPSTREAM"
+                    );
+                })
+        })
+        .unwrap_or_else(|| "https://api.openai.com/v1".into());
+    let mut state = freedas_gateway::AppState::new(upstream.clone(), pool.clone());
     for (provider, env) in freedas_gateway::PROVIDER_ENV_KEYS {
         if let Ok(key) = std::env::var(env)
             && !key.trim().is_empty()
@@ -83,7 +94,7 @@ async fn main() -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind((cli.hostname.as_str(), cli.port)).await?;
     println!(
         "freedas-gateway listening on http://{}:{} -> {}",
-        cli.hostname, cli.port, cli.upstream
+        cli.hostname, cli.port, upstream
     );
     axum::serve(listener, app).await?;
     Ok(())

@@ -83,18 +83,35 @@ impl AppState {
     }
 }
 
-/// Provider env vars read by the binary at startup.
+/// Provider env vars read by the binary at startup. `opencode-go` and `meta`
+/// are wired here so the gateway's authenticated catalog covers the same
+/// providers the session path reaches via OAuth (they share `OPENCODE_API_KEY`
+/// across the OpenCode Go/Zen surfaces).
 pub const PROVIDER_ENV_KEYS: &[(&str, &str)] = &[
     ("openai", "OPENAI_API_KEY"),
     ("anthropic", "ANTHROPIC_API_KEY"),
     ("google", "GEMINI_API_KEY"),
     ("openrouter", "OPENROUTER_API_KEY"),
     ("deepseek", "DEEPSEEK_API_KEY"),
+    ("opencode-go", "OPENCODE_API_KEY"),
+    ("meta", "META_API_KEY"),
 ];
 
+/// Canonical upstream env is `FREEDAS_GATEWAY_UPSTREAM`; the legacy binary
+/// name still works once so existing deploys do not silently reroute.
+fn upstream_env() -> String {
+    if let Ok(v) = std::env::var("FREEDAS_GATEWAY_UPSTREAM") {
+        return v;
+    }
+    if let Ok(v) = std::env::var("FREEDAS_UPSTREAM_URL") {
+        tracing::warn!("FREEDAS_UPSTREAM_URL is deprecated; use FREEDAS_GATEWAY_UPSTREAM");
+        return v;
+    }
+    "https://api.openai.com/v1".into()
+}
+
 pub fn app() -> Router {
-    let upstream = std::env::var("FREEDAS_GATEWAY_UPSTREAM")
-        .unwrap_or_else(|_| "https://api.openai.com/v1".into());
+    let upstream = upstream_env();
     let mut state = AppState::new(upstream, None);
     for (provider, env) in PROVIDER_ENV_KEYS {
         if let Some(key) = std::env::var(env).ok().filter(|k| !k.trim().is_empty()) {
@@ -314,7 +331,9 @@ async fn chat_completions(
     // A caller must not bill another workspace by replaying its session id:
     // when the session is already recorded, its workspace must match the
     // token's. Unknown sessions are allowed; the control plane records them
-    // on first use.
+    // on first use — a documented first-claim semantic: concurrent first-use
+    // of a fresh id from two workspaces races, but metering always bills the
+    // caller's own token, so no cross-workspace charge is possible.
     if let (Some(pool), Some(session_id), Some(workspace_id)) = (
         &state.pool,
         session.as_deref(),
@@ -437,6 +456,14 @@ async fn chat_completions(
 /// catalog when per-model prices matter.`
 const EMBEDDING_INPUT_COST_PER_MTOK: f64 = 0.02;
 
+/// Embedding models the flat rate prices; unknown names are rejected like
+/// chat rejects non-catalog models.
+const EMBEDDING_MODELS: &[&str] = &[
+    "text-embedding-3-small",
+    "text-embedding-3-large",
+    "text-embedding-ada-002",
+];
+
 async fn embeddings(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -457,6 +484,14 @@ async fn embeddings(
         .to_owned();
     if model.is_empty() {
         return Err(bad_request("model is required"));
+    }
+    // Embeddings is flat-priced, so it cannot meter arbitrary model names the
+    // way catalog-priced chat can; only known embedding models pass.
+    if !EMBEDDING_MODELS
+        .iter()
+        .any(|m| model == *m || model == format!("openai/{m}"))
+    {
+        return Err(bad_request(&format!("unknown embedding model: {model}")));
     }
     let provider = provider_of(&model).to_owned();
     if state.key_for(&provider).is_none() {
@@ -503,6 +538,7 @@ async fn embeddings(
             input_tokens,
             output_tokens: 0,
             cache_read_tokens: 0,
+            cache_write_tokens: 0,
         });
         record_meter(meter, usage).await;
     }
@@ -581,6 +617,9 @@ pub struct Usage {
     pub output_tokens: u64,
     /// Input tokens served from the provider cache; billed at the cache price.
     pub cache_read_tokens: u64,
+    /// Input tokens written into the provider cache; billed at the
+    /// cache-write price (typically higher than fresh input).
+    pub cache_write_tokens: u64,
 }
 
 /// Reads OpenAI-style `usage.prompt_tokens` / `usage.completion_tokens`
@@ -603,10 +642,16 @@ pub fn parse_usage(body: &Value) -> Option<Usage> {
         .and_then(Value::as_u64)
         .or_else(|| usage.get("cache_read_input_tokens").and_then(Value::as_u64))
         .unwrap_or(0);
+    let cache_write_tokens = usage
+        .get("cache_creation_input_tokens")
+        .or_else(|| usage.get("cache_write_input_tokens"))
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
     Some(Usage {
         input_tokens: input,
         output_tokens: output,
         cache_read_tokens,
+        cache_write_tokens,
     })
 }
 
@@ -659,11 +704,12 @@ pub fn estimate_cost(model: &ModelInfo, input_tokens: u64, max_tokens: Option<u6
 }
 
 fn usage_cost(model: &ModelInfo, usage: Usage) -> f64 {
-    let cached = usage.cache_read_tokens.min(usage.input_tokens);
-    let uncached = usage.input_tokens - cached;
-    let cost = uncached as f64 / 1e6 * model.cost_input
-        + cached as f64 / 1e6 * model.cost_cache_read
-        + usage.output_tokens as f64 / 1e6 * model.cost_output;
+    let cost = model.usage_cost(
+        usage.input_tokens,
+        usage.cache_read_tokens,
+        usage.cache_write_tokens,
+        usage.output_tokens,
+    );
     (cost * 1e6).round() / 1e6
 }
 
@@ -683,6 +729,7 @@ fn usage_from_body(body: &Value, estimated_input: u64) -> Usage {
         input_tokens: estimated_input,
         output_tokens: output_estimate(body),
         cache_read_tokens: 0,
+        cache_write_tokens: 0,
     })
 }
 
@@ -829,6 +876,7 @@ impl SseTap {
             input_tokens: estimated_input,
             output_tokens: (self.output_chars / 4).max(1) as u64,
             cache_read_tokens: 0,
+            cache_write_tokens: 0,
         })
     }
 }
@@ -851,28 +899,50 @@ fn delta_content_chars(value: &Value) -> usize {
         .unwrap_or(0)
 }
 
+/// Stream state whose Drop records metering even when the client disconnects
+/// before the terminal arm runs — a dropped Body must still debit real usage.
+struct MeterState {
+    tap: SseTap,
+    meter: Option<Meter>,
+}
+
+impl MeterState {
+    fn record(&mut self) {
+        if let Some(meter) = self.meter.take() {
+            let usage = self.tap.usage(meter.estimated_input);
+            tokio::spawn(record_meter(meter, usage));
+        }
+    }
+}
+
+impl Drop for MeterState {
+    fn drop(&mut self) {
+        self.record();
+    }
+}
+
 /// Forwards the upstream stream and meters it when it ends.
 fn metered_body(upstream: reqwest::Response, meter: Meter) -> Body {
     let stream = stream::unfold(
-        (upstream.bytes_stream(), SseTap::default(), Some(meter)),
-        |(mut chunks, mut tap, meter)| async move {
+        (
+            upstream.bytes_stream(),
+            MeterState {
+                tap: SseTap::default(),
+                meter: Some(meter),
+            },
+        ),
+        |(mut chunks, mut state)| async move {
             match chunks.next().await {
                 Some(Ok(chunk)) => {
-                    tap.observe(&chunk);
-                    Some((Ok::<Bytes, reqwest::Error>(chunk), (chunks, tap, meter)))
+                    state.tap.observe(&chunk);
+                    Some((Ok::<Bytes, reqwest::Error>(chunk), (chunks, state)))
                 }
                 Some(Err(error)) => {
-                    if let Some(meter) = meter {
-                        let usage = tap.usage(meter.estimated_input);
-                        tokio::spawn(record_meter(meter, usage));
-                    }
-                    Some((Err(error), (chunks, tap, None)))
+                    state.record();
+                    Some((Err(error), (chunks, state)))
                 }
                 None => {
-                    if let Some(meter) = meter {
-                        let usage = tap.usage(meter.estimated_input);
-                        tokio::spawn(record_meter(meter, usage));
-                    }
+                    state.record();
                     None
                 }
             }
@@ -895,7 +965,14 @@ async fn record_usage(
 ) -> Result<(), sqlx::Error> {
     let event_id = format!("use_{}", ulid::Ulid::new());
     let provider = model.split_once('/').map(|(p, _)| p).unwrap_or("unknown");
+    // Sub-half-microdollar costs round to zero and would ride free; clamp any
+    // nonzero metered cost to the ledger's smallest representable debit.
     let cost = (cost * 1e6).round() / 1e6;
+    let cost = if cost <= 0.0 && usage.input_tokens + usage.output_tokens > 0 {
+        1e-6
+    } else {
+        cost
+    };
 
     let mut tx = pool.begin().await?;
     // Serialize metering against reservations so the balance check below sees
@@ -964,7 +1041,9 @@ async fn record_usage(
     .fetch_one(&mut *tx)
     .await?;
     if balance < -1e-9 {
-        tracing::warn!(
+        // Error-level so alerting pipelines flag it: the workspace consumed
+        // more than its estimate and the next request will hit an empty wallet.
+        tracing::error!(
             workspace_id = %workspace_id,
             balance,
             cost,
@@ -1155,7 +1234,7 @@ async fn reserve_budget(
     )
     .bind(format!("led_{}", ulid::Ulid::new()))
     .bind(workspace_id)
-    .bind(format!("{:.6}", -est_cost))
+    .bind(format!("{:.6}", -est_cost.max(1e-6)))
     .bind(&id)
     .bind(now_ms())
     .execute(&mut *tx)
@@ -1165,7 +1244,7 @@ async fn reserve_budget(
     Ok(Reservation {
         id,
         workspace_id: workspace_id.to_string(),
-        amount: est_cost,
+        amount: est_cost.max(1e-6),
     })
 }
 
@@ -1376,6 +1455,9 @@ fn route(
         review_mode: false,
         pinned_model: None,
         workspace_remaining_usd: None,
+        quality_floor: None,
+        max_escalations: None,
+        estimated_cached_input: 0,
     };
     // The gateway has no per-session learning history; use static priors.
     freedas_router::select_with(&ctx, catalog, &[], hint, false)
@@ -1707,6 +1789,7 @@ mod tests {
                 input_tokens: 12,
                 output_tokens: 3,
                 cache_read_tokens: 0,
+                cache_write_tokens: 0,
             })
         );
         assert_eq!(parse_usage(&json!({"id":"x"})), None);
@@ -1716,6 +1799,7 @@ mod tests {
                 input_tokens: 1,
                 output_tokens: 2,
                 cache_read_tokens: 0,
+                cache_write_tokens: 0,
             })
         );
         assert_eq!(
@@ -1725,6 +1809,7 @@ mod tests {
                 input_tokens: 100,
                 output_tokens: 5,
                 cache_read_tokens: 80,
+                cache_write_tokens: 0,
             })
         );
         assert_eq!(
@@ -1733,6 +1818,7 @@ mod tests {
                 input_tokens: 7,
                 output_tokens: 0,
                 cache_read_tokens: 0,
+                cache_write_tokens: 0,
             })
         );
     }
@@ -1748,6 +1834,7 @@ mod tests {
                 input_tokens: 1_000_000,
                 output_tokens: 0,
                 cache_read_tokens: 0,
+                cache_write_tokens: 0,
             },
         );
         let cached = usage_cost(
@@ -1756,6 +1843,7 @@ mod tests {
                 input_tokens: 1_000_000,
                 output_tokens: 0,
                 cache_read_tokens: 1_000_000,
+                cache_write_tokens: 0,
             },
         );
         assert!((full - 3.0).abs() < 1e-9);
@@ -1790,6 +1878,7 @@ mod tests {
                 input_tokens: 11,
                 output_tokens: 4,
                 cache_read_tokens: 2,
+                cache_write_tokens: 0,
             }
         );
     }

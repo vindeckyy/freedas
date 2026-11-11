@@ -151,6 +151,7 @@ pub fn provider_with_key(
     match provider_id {
         "anthropic" => Some(std::sync::Arc::new(anthropic::Anthropic::new(key))),
         "google" | "gemini" => Some(std::sync::Arc::new(gemini::Gemini::new(key))),
+        #[cfg(debug_assertions)]
         "fake" => Some(std::sync::Arc::new(fake::FakeProvider)),
         "opencode-go" => Some(std::sync::Arc::new(
             openai_compatible::OpenAiCompatible::opencode(
@@ -416,21 +417,41 @@ fn estimate_input_tokens(request: &ChatRequest) -> u64 {
 }
 
 /// Cost from the bundled catalog; unknown models report zero rather than a
-/// fabricated number.
-pub(crate) fn usage_cost(model: &ModelRef, input: u64, output: u64, cache_read: u64) -> f64 {
+/// fabricated number. The match is on `provider/id` only — an id-only
+/// fallback would attribute one provider's spend to a same-named model
+/// elsewhere.
+pub(crate) fn usage_cost(
+    model: &ModelRef,
+    input: u64,
+    output: u64,
+    cache_read: u64,
+    cache_write: u64,
+) -> f64 {
     let catalog = freedas_catalog::builtin_catalog();
     let full = format!("{}/{}", model.provider, model.id);
-    let Some(info) = freedas_catalog::get_model(&catalog, &full)
-        .or_else(|| catalog.iter().find(|m| m.id == model.id))
-    else {
+    let Some(info) = freedas_catalog::get_model(&catalog, &full) else {
         return 0.0;
     };
-    let cached = cache_read.min(input);
-    let fresh = input.saturating_sub(cached);
-    (fresh as f64 * info.cost_input
-        + cached as f64 * info.cost_cache_read
-        + output as f64 * info.cost_output)
-        / 1e6
+    info.usage_cost(input, cache_read, cache_write, output)
+}
+
+/// Resolved endpoint URLs must be `https://`, except `http://` loopback for
+/// local dev servers and mocks — the same rule oauth's `check_endpoint_url`
+/// applies. Values without a `://` scheme marker pass through: they are bare
+/// hostnames or non-URL literals that get a scheme added downstream.
+pub fn endpoint_url_ok(url: &str) -> bool {
+    if !url.contains("://") {
+        return true;
+    }
+    if url.starts_with("https://") {
+        return true;
+    }
+    reqwest::Url::parse(url).ok().is_some_and(|u| {
+        u.scheme() == "http"
+            && u.host_str().is_some_and(|h| {
+                h == "localhost" || h.starts_with("127.") || h == "::1" || h == "[::1]"
+            })
+    })
 }
 
 /// Normalize a gateway base so `FREEDAS_GATEWAY_URL=https://host` and
@@ -505,6 +526,7 @@ pub(crate) fn sse_stream(
     Box::pin(stream)
 }
 
+#[cfg(debug_assertions)]
 pub mod fake {
     use super::*;
     use futures::stream;
@@ -751,7 +773,7 @@ pub mod openai_compatible {
             if self.usage_emitted {
                 return;
             }
-            let cost = usage_cost(&self.model, input, output, cache_read);
+            let cost = usage_cost(&self.model, input, output, cache_read, 0);
             out.push(Ok(ChatEvent::Usage {
                 input,
                 output,
@@ -769,7 +791,7 @@ pub mod openai_compatible {
             }
             let input = self.estimated_input;
             let output = self.output_bytes / 4;
-            let cost = usage_cost(&self.model, input, output, 0);
+            let cost = usage_cost(&self.model, input, output, 0, 0);
             out.push(Ok(ChatEvent::Usage {
                 input,
                 output,
@@ -1085,7 +1107,7 @@ pub mod anthropic {
             } else {
                 (self.estimated_input, self.output_bytes / 4, 0, 0, true)
             };
-            let cost = usage_cost(&self.model, input, output, cache_read);
+            let cost = usage_cost(&self.model, input, output, cache_read, cache_write);
             out.push(Ok(ChatEvent::Usage {
                 input,
                 output,
@@ -1500,7 +1522,7 @@ pub mod gemini {
             } else {
                 (self.estimated_input, self.output_bytes / 4, 0, true)
             };
-            let cost = usage_cost(&self.model, input, output, cache_read);
+            let cost = usage_cost(&self.model, input, output, cache_read, 0);
             out.push(Ok(ChatEvent::Usage {
                 input,
                 output,

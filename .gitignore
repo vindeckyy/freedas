@@ -51,3 +51,6 @@ id_ed25519*
 *.log
 lcov.info
 coverage/
+
+# Local security reports. They describe live gaps; keep them out of the repo.
+pentest-*.md

@@ -15,6 +15,9 @@ process sidecars.
 A plugin lives in `<project>/.freedas/plugins/` or
 `~/.config/freedas/plugins/` as a `.wasm`/`.js`/`.ts` file, a directory
 containing one, or a `freedas-plugin.json` manifest naming the entry file.
+Project plugins and `plugin` config entries resolve only in a trusted
+project (`trust_project_code`); hash trust is re-verified at load time, and
+`FREEDAS_PLUGIN_TRUST_FILE` relocates the trust store for CI isolation.
 
 The `plugin` config key enables plugins:
 

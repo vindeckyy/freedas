@@ -42,7 +42,7 @@ network access by default regardless.
 
 ## What is the difference between `--auto`, `--manual`, `bypass`, `auto`, `ask`?
 
-`bypass`/`auto`/`ask` are `permission_mode` values (the config default);
+`bypass`/`auto`/`ask` are `permission_mode` values (config default `auto`);
 `--auto`/`--manual` are per-run CLI overrides. Details in
 [Permissions](./permissions.md).
 

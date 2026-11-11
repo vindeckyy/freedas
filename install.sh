@@ -17,6 +17,13 @@ while [ $# -gt 0 ]; do
   esac
 done
 
+# PREFIX is written into a shell rc line below; an allowlist of safe path
+# characters rejects anything that could break out of the quoting.
+case "$PREFIX" in
+  *[!A-Za-z0-9_.,/~+=:@-]*)
+    echo "unsafe --prefix value" >&2; exit 2 ;;
+esac
+
 os="$(uname -s | tr '[:upper:]' '[:lower:]')"
 arch="$(uname -m)"
 case "$arch" in
@@ -36,19 +43,23 @@ esac
 if [ "$os" = "darwin" ]; then
   triple="${arch}-apple-darwin"
 else
-  # glibc and musl need different binaries; Alpine (or any musl host) takes
-  # the musl asset.
+  # Only gnu (glibc) assets are published; musl hosts must build from source.
   if [ -f /etc/alpine-release ] || { command -v ldd >/dev/null 2>&1 && ldd --version 2>&1 | grep -qi musl; }; then
-    libc="musl"
-  else
-    libc="gnu"
+    echo "no musl release is published; build from source (cargo install --locked freedas)" >&2
+    exit 1
   fi
-  triple="${arch}-unknown-linux-${libc}"
+  triple="${arch}-unknown-linux-gnu"
 fi
 Asset="freedas-${triple}.tar.gz"
 # `FREEDAS_RELEASE_BASE` points the installer at a mirror (or a local
 # `file://` directory in tests); the default is the GitHub release page.
 BASE="${FREEDAS_RELEASE_BASE:-https://github.com/freedas/freedas/releases}"
+case "$BASE" in
+  https://*|file://*) ;;
+  *) echo "FREEDAS_RELEASE_BASE must be an https:// or file:// URL" >&2; exit 2 ;;
+esac
+# A redirect must not hop to an unexpected scheme or downgrade to http.
+CURL="curl -fsSL --proto =https,file --proto-redir =https"
 # GitHub serves a pinned tag at .../releases/download/<tag>/<asset> and the
 # rolling tag at .../releases/latest/download/<asset>.
 if [ "$VERSION" = "latest" ]; then
@@ -62,12 +73,12 @@ echo "Freedas $VERSION for $triple"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 
-curl -fsSL -o "$tmp/$Asset" "$url"
+$CURL -o "$tmp/$Asset" "$url"
 # `freedas upgrade` refuses installs without a published sha256; the script
 # holds the same line and verifies the checksum before extracting.
-if curl -fsSL -o "$tmp/$Asset.sha256" "$url.sha256" 2>/dev/null; then
+if $CURL -o "$tmp/$Asset.sha256" "$url.sha256" 2>/dev/null; then
   expected="$(awk '{print $1}' "$tmp/$Asset.sha256")"
-elif curl -fsSL -o "$tmp/SHA256SUMS" "$tag_url/SHA256SUMS" 2>/dev/null; then
+elif $CURL -o "$tmp/SHA256SUMS" "$tag_url/SHA256SUMS" 2>/dev/null; then
   expected="$(awk -v a="$Asset" '$2 == a {print $1}' "$tmp/SHA256SUMS")"
 else
   expected=""
@@ -88,13 +99,33 @@ if [ "$actual" != "$expected" ]; then
   echo "checksum mismatch for $Asset" >&2
   exit 1
 fi
-tar -xzf "$tmp/$Asset" -C "$tmp"
-# Archives may nest the binary; locate it instead of assuming the root.
-bin="$(find "$tmp" -name freedas -type f -print | head -n 1)"
-if [ -z "$bin" ]; then
-  echo "release archive does not contain a freedas binary" >&2
+
+# Checksums travel the same channel as the binary; a signature verifies the
+# publisher, not just the bytes. Verify when cosign and a signature are
+# available; warn (do not block) otherwise so mirrors keep working.
+if [ -n "${FREEDAS_INSTALL_SKIP_SIG:-}" ]; then
+  :
+elif command -v cosign >/dev/null 2>&1 && $CURL -o "$tmp/$Asset.sig" "$url.sig" 2>/dev/null; then
+  if ! cosign verify-blob --signature "$tmp/$Asset.sig" \
+       --certificate-identity-regexp 'github.com/freedas' \
+       --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
+       "$tmp/$Asset" >/dev/null 2>&1; then
+    echo "signature verification failed for $Asset" >&2
+    exit 1
+  fi
+else
+  echo "warning: installing on checksum alone (no signature available)" >&2
+fi
+
+tar -xzf "$tmp/$Asset" -C "$tmp" --no-absolute-filenames 2>/dev/null \
+  || tar -xzf "$tmp/$Asset" -C "$tmp"
+# Exactly one freedas binary is expected; a layout surprise aborts the install.
+mapfile -t found < <(find "$tmp" -name freedas -type f -print)
+if [ "${#found[@]}" -ne 1 ]; then
+  echo "release archive has unexpected layout (${#found[@]} freedas files)" >&2
   exit 1
 fi
+bin="${found[0]}"
 mkdir -p "$PREFIX"
 install -m 0755 "$bin" "$PREFIX/freedas"
 echo "Installed to $PREFIX/freedas"

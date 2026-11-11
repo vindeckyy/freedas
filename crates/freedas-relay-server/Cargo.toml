@@ -20,6 +20,7 @@ serde.workspace = true
 serde_json.workspace = true
 futures.workspace = true
 tokio-tungstenite = "0.28"
+ulid.workspace = true
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }

@@ -77,6 +77,16 @@ pub struct StepContext {
     /// Workspace balance left for this step, when the caller knows it. Selection
     /// prefers candidates the balance covers and fails when none fit.
     pub workspace_remaining_usd: Option<f64>,
+    /// Operator floor from `router.quality_floor`; selection never picks below
+    /// `max(class.floor(), quality_floor)`. `None` means class floors only.
+    pub quality_floor: Option<f32>,
+    /// Operator cap from `router.max_escalations`; `None` uses the documented
+    /// default [`MAX_ESCALATIONS`].
+    pub max_escalations: Option<u32>,
+    /// Input tokens the caller expects to be served from cache, if it tracks
+    /// them. Reservations price these at the cache-read rate instead of the
+    /// fresh-input rate.
+    pub estimated_cached_input: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -109,6 +119,12 @@ pub enum RouterError {
 /// The documented default `router.max_escalations`.
 const MAX_ESCALATIONS: u32 = 2;
 
+/// Prompt keywords are hints, not proof: a class chosen by keyword matching
+/// (rather than the caller's agent/mode signals) can lower its floor no
+/// further than this. Otherwise "docs" inside a security-sensitive prompt
+/// would quietly drop the selection bar to the cheapest tier.
+const KEYWORD_CLASS_MIN_FLOOR: f32 = 0.70;
+
 /// Keyword match on word boundaries so `move` does not fire on `remove`,
 /// `how` on `show`, or `split` on `splitter`. Multi-word keys match as
 /// phrases; both sides are already lowercased by the caller.
@@ -130,6 +146,17 @@ fn contains_word(haystack: &str, needle: &str) -> bool {
         i += 1;
     }
     false
+}
+
+/// True when the class came from prompt/error keywords rather than explicit
+/// caller signals (agent name, review mode). Keyword-derived classes get the
+/// [`KEYWORD_CLASS_MIN_FLOOR`] cap so prompt content cannot steer a step into
+/// the cheapest floor.
+pub fn class_is_keyword_derived(ctx: &StepContext, class: TaskClass) -> bool {
+    if ctx.agent == "plan" || ctx.agent == "plan-quick" || ctx.review_mode {
+        return false;
+    }
+    !matches!(class, TaskClass::Feature | TaskClass::Edit)
 }
 
 pub fn classify(ctx: &StepContext) -> TaskClass {
@@ -227,7 +254,18 @@ pub fn score(ctx: &StepContext, class: TaskClass) -> f32 {
 }
 
 fn seeded_rand(session_hint: &str, step: u32) -> f32 {
-    let mut h: u64 = 0xcbf29ce484222325;
+    // A per-process nonce keeps the schedule deterministic for the session
+    // lifetime but unpredictable from the session id alone — a public id must
+    // not let an observer forecast which steps explore.
+    static NONCE: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    let nonce = *NONCE.get_or_init(|| {
+        let t = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.subsec_nanos() as u64 ^ d.as_secs().rotate_left(21))
+            .unwrap_or(0x9e3779b97f4a7c15);
+        t ^ (u64::from(std::process::id()) << 32)
+    });
+    let mut h: u64 = 0xcbf29ce484222325 ^ nonce;
     for &b in session_hint.as_bytes() {
         h ^= b as u64;
         h = h.wrapping_mul(0x100000001b3);
@@ -301,8 +339,8 @@ fn candidate<'a>(
     class: TaskClass,
 ) -> Candidate<'a> {
     let output = model.max_output.min(class.output_budget());
-    let cost =
-        model.estimate_cost(ctx.estimated_input_tokens, output) + (1.0 - quality as f64) * 0.02;
+    let cost = model.usage_cost(ctx.estimated_input_tokens, ctx.estimated_cached_input, 0, output)
+        + (1.0 - quality as f64) * 0.02;
     Candidate {
         model,
         cost: if cost.is_finite() { cost } else { f64::MAX },
@@ -340,7 +378,9 @@ pub fn select_with(
                 model: pinned.clone(),
                 task_class: class,
                 score: sc,
-                tier: "unknown".into(),
+                // Unaudited: no catalog row means no price, so the spend is
+                // flagged rather than recorded as $0.00.
+                tier: "unaudited".into(),
                 reason: "pinned-unknown".into(),
                 escalations: 0,
                 estimated_cost_usd: 0.0,
@@ -348,6 +388,15 @@ pub fn select_with(
                 mode: "pinned-unknown".into(),
             });
         };
+        // A pin is an explicit choice, but it cannot conjure capabilities:
+        // no-tools or too-small context fails the step loudly instead of
+        // dying later inside the provider.
+        let needed = ctx
+            .estimated_input_tokens
+            .saturating_add(class.output_budget());
+        if !m.tools || m.context < needed {
+            return Err(RouterError::NoModel { needed });
+        }
         let tier = m.tier.clone();
         let id = m.full_id();
         let quality = effective_quality(m, learned, learn, class, &id);
@@ -381,7 +430,7 @@ pub fn select_with(
     let eligible: Vec<Candidate<'_>> = catalog
         .iter()
         // Free-tier models are pinned-only: they answer a specific client.
-        .filter(|m| m.tools && m.tier != "free" && m.context >= needed)
+        .filter(|m| m.routable() && m.context >= needed)
         .map(|m| {
             let quality = effective_quality(m, learned, learn, class, &m.full_id());
             candidate(ctx, m, quality, class)
@@ -392,13 +441,24 @@ pub fn select_with(
     }
 
     // One failure is noise; two consecutive failures escalate one tier,
-    // capped like `router.max_escalations`.
+    // capped by `router.max_escalations` (default MAX_ESCALATIONS).
+    let max_escalations = ctx.max_escalations.unwrap_or(MAX_ESCALATIONS);
     let escalations = if ctx.failures_so_far >= 2 {
-        ctx.failures_so_far.min(MAX_ESCALATIONS)
+        ctx.failures_so_far.min(max_escalations)
     } else {
         0
     };
-    let mut floor = (class.floor() + 0.05 * escalations as f32).min(1.0);
+    // The effective floor never drops below the operator's `quality_floor`,
+    // and keyword-derived classes never drop below KEYWORD_CLASS_MIN_FLOOR:
+    // prompt text can only steer a step to a bounded-cheap class.
+    let mut floor = (class.floor() + 0.05 * escalations as f32)
+        .max(ctx.quality_floor.unwrap_or(0.0))
+        .max(if class_is_keyword_derived(ctx, class) {
+            KEYWORD_CLASS_MIN_FLOOR
+        } else {
+            0.0
+        })
+        .min(1.0);
 
     // Never explore or select a model the remaining balance cannot cover.
     let affordable: Vec<Candidate<'_>> = match ctx.workspace_remaining_usd {
@@ -492,6 +552,9 @@ mod tests {
             review_mode: false,
             pinned_model: None,
             workspace_remaining_usd: None,
+            quality_floor: None,
+            max_escalations: None,
+            estimated_cached_input: 0,
         }
     }
 
@@ -512,6 +575,7 @@ mod tests {
             cost_input,
             cost_output,
             cost_cache_read: cost_input * 0.1,
+            cost_cache_write: 0.0,
             tools,
             reasoning: false,
             vision: false,
@@ -584,7 +648,7 @@ mod tests {
         let d = select(&c, &cat, &[], "s").unwrap();
         assert_eq!(d.mode, "pinned-unknown");
         assert_eq!(d.model, "nope/missing");
-        assert_eq!(d.tier, "unknown");
+        assert_eq!(d.tier, "unaudited");
         assert_eq!(d.estimated_cost_usd, 0.0);
         assert_eq!(d.effective_quality, 0.0);
         // ...but fails closed once a budget must authorize the spend.

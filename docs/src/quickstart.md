@@ -54,10 +54,11 @@ Describe the change the way you would to a teammate:
 Add input validation to the signup form, with tests, and run the suite.
 ```
 
-Freedas edits the files it needs and runs checks. The TUI starts in bypass
-mode, which approves asks without prompting; explicit `deny` rules and the
-catastrophic deny list still block. Pass `--manual` to be asked every time, or
-change the mode with `/permissions`. See [Permissions](./permissions.md).
+Freedas edits the files it needs and runs checks. The TUI starts in `auto`
+mode, which prompts on each ask; `--auto` (or `bypass` mode) approves asks
+without prompting, and explicit `deny` rules and the catastrophic deny list
+still block. Pass `--manual` to be asked every time, or change the mode with
+`/permissions`. See [Permissions](./permissions.md).
 
 ## Review the diff
 
