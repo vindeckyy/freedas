@@ -1959,6 +1959,7 @@ pub async fn run(cli: Cli, project_root: PathBuf) -> Result<i32, Box<dyn std::er
             println!("bin: {}", p.bin_dir.display());
             println!("project: {}", project_root.display());
             println!("db: {}", p.db_path().display());
+            println!("sandbox: {}", freedas_sandbox::status());
             let pid = d.ensure_project(&project_root)?;
             println!("logs: {}", p.state_dir.join("logs").display());
             println!("snapshots: {}", p.snapshot_dir(&pid).display());
