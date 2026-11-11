@@ -2645,6 +2645,9 @@ async fn attach_run(opts: AttachRun) -> Result<i32, Box<dyn std::error::Error>> 
     let mut completed = false;
     let mut blocked: Vec<String> = Vec::new();
     let mut final_text = String::new();
+    // Set when the server ends the run; an EOF without it means the stream
+    // dropped mid-run and the transcript below is truncated, not finished.
+    let mut saw_idle = false;
     'outer: loop {
         // The server sends SSE keep-alives; a silent connection is dead.
         let chunk =
@@ -2710,7 +2713,10 @@ async fn attach_run(opts: AttachRun) -> Result<i32, Box<dyn std::error::Error>> 
                         )
                         .into());
                     }
-                    "session.idle" => break 'outer,
+                    "session.idle" => {
+                        saw_idle = true;
+                        break 'outer;
+                    }
                     "session.stopped" if !json_mode => {
                         eprintln!("session stopped");
                     }
@@ -2742,6 +2748,23 @@ async fn attach_run(opts: AttachRun) -> Result<i32, Box<dyn std::error::Error>> 
             Err(_) => Some("attach: prompt request did not complete".to_string()),
         };
     if let Some(message) = prompt_error {
+        if json_mode {
+            println!(
+                "{}",
+                serde_json::json!({
+                    "type": "session.error",
+                    "sessionID": session_id,
+                    "error": message,
+                })
+            );
+        }
+        return Err(message.into());
+    }
+    // The stream closed before session.idle: a dropped connection, not a
+    // finished run. Report failure rather than present a truncated transcript
+    // as success.
+    if !saw_idle {
+        let message = "attach: event stream closed before the run ended".to_string();
         if json_mode {
             println!(
                 "{}",
