@@ -255,10 +255,33 @@ impl Db {
             .optional()?)
     }
 
+    /// Most recently updated top-level session. Subagent children carry
+    /// `parent_id` and must not win `--continue` over their parent.
+    pub fn latest_root_session(&self, project_id: &str) -> Result<Option<SessionRow>> {
+        let conn = self.lock();
+        conn.query_row(
+            "SELECT id, title, agent, status, parent_id, created_at, updated_at FROM sessions WHERE project_id = ?1 AND parent_id IS NULL ORDER BY updated_at DESC LIMIT 1",
+            params![project_id],
+            |r| {
+                Ok(SessionRow {
+                    id: r.get(0)?,
+                    title: r.get(1)?,
+                    agent: r.get(2)?,
+                    status: r.get(3)?,
+                    parent_id: r.get(4)?,
+                    created_at: r.get(5)?,
+                    updated_at: r.get(6)?,
+                })
+            },
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
     pub fn list_sessions(&self, project_id: &str, limit: usize) -> Result<Vec<SessionRow>> {
         let conn = self.lock();
         let mut stmt = conn.prepare(
-            "SELECT id, title, agent, status, created_at, updated_at FROM sessions WHERE project_id = ?1 ORDER BY updated_at DESC LIMIT ?2")?;
+            "SELECT id, title, agent, status, parent_id, created_at, updated_at FROM sessions WHERE project_id = ?1 ORDER BY updated_at DESC LIMIT ?2")?;
         let rows = stmt
             .query_map(params![project_id, limit_i64(limit)], |r| {
                 Ok(SessionRow {
@@ -266,8 +289,9 @@ impl Db {
                     title: r.get(1)?,
                     agent: r.get(2)?,
                     status: r.get(3)?,
-                    created_at: r.get(4)?,
-                    updated_at: r.get(5)?,
+                    parent_id: r.get(4)?,
+                    created_at: r.get(5)?,
+                    updated_at: r.get(6)?,
                 })
             })?
             .collect::<std::result::Result<Vec<_>, SqlError>>()?;
@@ -1698,6 +1722,7 @@ pub struct SessionRow {
     pub title: String,
     pub agent: String,
     pub status: String,
+    pub parent_id: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
 }

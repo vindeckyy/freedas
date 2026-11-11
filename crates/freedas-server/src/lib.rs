@@ -540,6 +540,7 @@ async fn list_sessions(State(s): State<AppState>, Query(q): Query<PageQuery>) ->
                 };
                 json!({
                 "id": r.id, "title": r.title, "agent": r.agent, "status": status,
+                "parentID": r.parent_id,
                 "createdAt": r.created_at, "updatedAt": r.updated_at
                 })
             })

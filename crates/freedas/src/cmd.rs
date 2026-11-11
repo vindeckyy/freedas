@@ -147,7 +147,7 @@ pub async fn run(cli: Cli, project_root: PathBuf) -> Result<i32, Box<dyn std::er
                 let pid = d.ensure_project(&project_root)?;
                 let mut session_id: Option<String> = None;
                 if cli.continue_ {
-                    session_id = d.list_sessions(&pid, 1)?.first().map(|s| s.id.clone());
+                    session_id = d.latest_root_session(&pid)?.map(|s| s.id);
                 }
                 if let Some(sid) = &cli.session {
                     // Same project-scope guard as `run --session`.
@@ -296,7 +296,7 @@ pub async fn run(cli: Cli, project_root: PathBuf) -> Result<i32, Box<dyn std::er
             let pid = d.ensure_project(&project_root)?;
             let mut session_id: Option<String> = None;
             if continue_ {
-                session_id = d.list_sessions(&pid, 1)?.first().map(|s| s.id.clone());
+                session_id = d.latest_root_session(&pid)?.map(|s| s.id);
             }
             if let Some(sid) = session {
                 // Sessions are project-scoped: an id from another project would
@@ -579,7 +579,8 @@ pub async fn run(cli: Cli, project_root: PathBuf) -> Result<i32, Box<dyn std::er
             crate::SessionCommands::List => {
                 let pid = d.ensure_project(&project_root)?;
                 for s in d.list_sessions(&pid, 50)? {
-                    println!("{}\t{}\t{}\t{}", s.id, s.status, s.agent, s.title);
+                    let kind = if s.parent_id.is_some() { "sub" } else { "main" };
+                    println!("{}\t{}\t{}\t{}\t{}", s.id, s.status, kind, s.agent, s.title);
                 }
                 Ok(0)
             }
