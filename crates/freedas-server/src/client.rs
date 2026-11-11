@@ -75,6 +75,16 @@ pub async fn stream_events(base: &str, on_event: impl AsyncFn(Value)) -> Result<
         .send()
         .await
         .map_err(|e| e.to_string())?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        let detail = serde_json::from_str::<Value>(&text)
+            .ok()
+            .and_then(|v| v.get("error").and_then(|e| e.as_str().map(String::from)))
+            .unwrap_or(text);
+        let detail: String = detail.chars().take(300).collect();
+        return Err(format!("http {status}: {detail}"));
+    }
     let mut stream = resp.bytes_stream();
     let mut buffer = String::new();
     while let Some(chunk) = stream.next().await {

@@ -102,10 +102,8 @@ fn runner(
     ))
 }
 
-/// POST to the local server. `path` starts with `/`.
-/// Mirror the local server's SSE stream onto the relay as `Event` frames and
-/// surface `permission.asked` as a `Permission` frame. Reconnects when the
-/// local server restarts.
+/// Dispatch the parsed CLI. Exit codes: 0 ok, 1 error, 2 usage, 3
+/// permission-blocked, 4 budget, 5 sandbox-unavailable.
 pub async fn run(cli: Cli, project_root: PathBuf) -> Result<i32, Box<dyn std::error::Error>> {
     let disable_project = std::env::var("FREEDAS_DISABLE_PROJECT_CONFIG")
         .map(|v| v == "1")
@@ -1631,6 +1629,7 @@ pub async fn run(cli: Cli, project_root: PathBuf) -> Result<i32, Box<dyn std::er
             })
             .await
             .map_err(|e| scrub_url(&e, &url))?;
+            eprintln!("event stream closed");
             Ok(0)
         }
         Some(Commands::Pr { number }) => {
