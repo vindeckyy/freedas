@@ -1706,6 +1706,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn session_endpoints_reject_foreign_project_ids() {
+        let (_dir, db, paths) = setup();
+        // A session minted under another project must 404 on every endpoint:
+        // the server is single-project, same guard as the CLI's --session.
+        let foreign_pid = db
+            .ensure_project(std::path::Path::new("/some/other/project"))
+            .expect("pid");
+        let foreign = db
+            .create_session(&foreign_pid, "build", "foreign", None)
+            .expect("foreign session");
+        let server = app_with_auth(db, paths, Auth::default());
+        let json = &[("content-type", "application/json")];
+        for (method, uri, body) in [
+            ("GET", format!("/session/{foreign}"), None),
+            ("GET", format!("/session/{foreign}/message"), None),
+            ("GET", format!("/session/{foreign}/usage"), None),
+            ("GET", format!("/session/{foreign}/children"), None),
+            ("GET", format!("/session/{foreign}/diff"), None),
+            ("GET", format!("/session/{foreign}/status"), None),
+            ("POST", format!("/session/{foreign}/message"), Some("{}")),
+            (
+                "POST",
+                format!("/session/{foreign}/prompt_async"),
+                Some("{}"),
+            ),
+            ("POST", format!("/session/{foreign}/abort"), None),
+            ("POST", format!("/session/{foreign}/revert"), None),
+            ("POST", format!("/session/{foreign}/unrevert"), None),
+            (
+                "POST",
+                format!("/session/{foreign}/shell"),
+                Some(r#"{"command":"ls"}"#),
+            ),
+            ("POST", format!("/session/{foreign}/fork"), Some("{}")),
+            ("POST", format!("/session/{foreign}/summarize"), None),
+            ("POST", format!("/session/{foreign}/init"), None),
+            (
+                "PATCH",
+                format!("/session/{foreign}"),
+                Some(r#"{"title":"x"}"#),
+            ),
+            ("DELETE", format!("/session/{foreign}"), None),
+        ] {
+            let (status, _) = send(&server, method, &uri, body, json).await;
+            assert_eq!(status, StatusCode::NOT_FOUND, "{method} {uri}");
+        }
+    }
+
+    #[tokio::test]
     async fn auth_requires_the_configured_token() {
         let (_dir, db, paths) = setup();
         let server = app_with_auth(db, paths, Auth::new(Some("secret".into()), None));
