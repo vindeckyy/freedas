@@ -48,9 +48,7 @@ for t in bash sh git env uname id cat mkdir touch; do
   command -v "$t" >/dev/null 2>&1 && ln -sf "$(command -v "$t")" "fakepath/$t"
 done
 OUT=$(PATH="$PWD/fakepath" $BIN run "RUN:touch unsandboxed-marker" --auto --format json 2>"$D/nosandbox.err")
-SID=$(echo "$OUT" | grep -o 'ses_[A-Z0-9]*' | head -1)
-$BIN export "$SID" > "$D/nosandbox.json" 2>/dev/null || true
-check "refuses unsandboxed" "grep -qi 'sandbox backend' '$D/nosandbox.json'"
+check "refuses unsandboxed" "echo '$OUT' | grep -qi 'sandbox backend'"
 check "marker not written"  "test ! -e unsandboxed-marker"
 
 echo "== 4. plan mode =="

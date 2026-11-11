@@ -331,13 +331,31 @@ pub async fn run(cli: Cli, project_root: PathBuf) -> Result<i32, Box<dyn std::er
                         auto,
                         manual,
                         workspace: cfg.workspace.clone(),
-                        session_id,
+                        session_id: session_id.clone(),
                         title,
                         variant,
                         depth: 0,
                         parent_id: None,
                         review_mode: false,
-                        progress: None,
+                        progress: if format == "json" {
+                            let sid = session_id.clone().unwrap_or_default();
+                            Some(std::sync::Arc::new(move |msg: String| {
+                                // \u{2} payloads are tool results; forward them
+                                // so headless consumers see tool failures as
+                                // they happen instead of only in the summary.
+                                if let Some(json) = msg.strip_prefix('\u{2}')
+                                    && let Ok(mut v) =
+                                        serde_json::from_str::<serde_json::Value>(json)
+                                {
+                                    v["type"] = "tool.result".into();
+                                    v["sessionID"] = sid.clone().into();
+                                    println!("{v}");
+                                }
+                            })
+                                as freedas_session::ProgressSink)
+                        } else {
+                            None
+                        },
                         headless: true,
                         mcp_disabled: Vec::new(),
                         approver: if auto || !std::io::IsTerminal::is_terminal(&std::io::stdin()) {
