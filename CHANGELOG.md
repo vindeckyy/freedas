@@ -1,5 +1,26 @@
 # Changelog
 
+## Unreleased
+
+Fixes and hardening since 0.1.0:
+
+- The local server keeps answering while a permission prompt is parked. A
+  parked ask no longer freezes every request, a client that connects while
+  one is parked is told about it, and `SIGTERM` ends the run instead of
+  waiting out the ten-minute timeout.
+- `freedas memory forget` sticks: the agent's `memory` tool can no longer
+  re-add a forgotten record.
+- ACP: a terminal whose process has ended no longer occupies a terminal
+  slot, and the oldest idle session is evicted instead of the server
+  refusing new sessions for the life of the process.
+- The web UI and `freedas attach` report that the server dropped events and
+  refetch, instead of showing a transcript that silently lost a turn.
+- The CLI retries an idempotent read after a transient failure. A prompt is
+  never retried, so a second run cannot start.
+- The control plane applies its schema under a database lock, so two
+  instances starting at once no longer race, and a sandbox without a branch
+  no longer answers `500`.
+
 ## 0.1.0
 
 First public build of the free, self-hosted coding agent.
