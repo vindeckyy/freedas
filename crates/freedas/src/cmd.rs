@@ -356,13 +356,32 @@ pub async fn run(cli: Cli, project_root: PathBuf) -> Result<i32, Box<dyn std::er
                                             "marker": marker,
                                         })
                                     );
-                                } else if let Some(json) = msg.strip_prefix('\u{2}')
-                                    && let Ok(mut v) =
+                                } else if let Some(json) = msg.strip_prefix('\u{2}') {
+                                    if let Ok(mut v) =
                                         serde_json::from_str::<serde_json::Value>(json)
-                                {
-                                    v["type"] = "tool.result".into();
-                                    v["sessionID"] = sid.clone().into();
-                                    println!("{v}");
+                                    {
+                                        v["type"] = "tool.result".into();
+                                        v["sessionID"] = sid.clone().into();
+                                        println!("{v}");
+                                    }
+                                } else if let Some(t) = msg.strip_prefix('\u{3}') {
+                                    println!(
+                                        "{}",
+                                        serde_json::json!({
+                                            "type": "message.part.delta",
+                                            "sessionID": sid,
+                                            "part": {"type": "reasoning", "text": t},
+                                        })
+                                    );
+                                } else {
+                                    println!(
+                                        "{}",
+                                        serde_json::json!({
+                                            "type": "message.part.delta",
+                                            "sessionID": sid,
+                                            "text": msg,
+                                        })
+                                    );
                                 }
                             })
                                 as freedas_session::ProgressSink)

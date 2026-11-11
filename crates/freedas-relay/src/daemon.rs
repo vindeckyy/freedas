@@ -580,6 +580,12 @@ fn spawn_prompt(
                                     "part": { "kind": "text", "data": { "text": chunk } },
                                 })
                             })
+                    } else if let Some(t) = chunk.strip_prefix('\u{3}') {
+                        json!({
+                            "type": "message.part.updated",
+                            "sessionID": session_id,
+                            "part": { "kind": "reasoning", "data": { "text": t } },
+                        })
                     } else {
                         json!({
                             "type": "message.part.updated",

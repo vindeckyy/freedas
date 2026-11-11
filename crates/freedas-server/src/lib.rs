@@ -771,6 +771,18 @@ fn spawn_run(s: &AppState, id: String, request: RunRequest) -> Result<(), ApiErr
                                     v["sessionID"] = session_id.clone().into();
                                     emit(&bus, &events, v);
                                 }
+                            } else if let Some(t) = chunk.strip_prefix('\u{3}') {
+                                // Reasoning deltas carry their own part type so
+                                // clients never render them as assistant text.
+                                emit(
+                                    &bus,
+                                    &events,
+                                    json!({
+                                        "type": "message.part.delta",
+                                        "sessionID": session_id,
+                                        "part": {"type": "reasoning", "text": t},
+                                    }),
+                                );
                             } else {
                                 emit(
                                     &bus,
