@@ -414,12 +414,28 @@ pub async fn run(cli: Cli, project_root: PathBuf) -> Result<i32, Box<dyn std::er
                 .await;
             let r = match run {
                 Ok(r) => r,
-                Err(freedas_core::FreedasError::BudgetExceeded) => return Ok(4),
-                Err(freedas_core::FreedasError::SandboxUnavailable(m)) => {
-                    eprintln!("sandbox unavailable: {m}");
-                    return Ok(5);
+                // Every error exit ends the JSONL stream with session.error so
+                // consumers can tell a terminal failure from a truncated pipe.
+                Err(e) => {
+                    if format == "json" {
+                        println!(
+                            "{}",
+                            serde_json::json!({
+                                "type": "session.error",
+                                "sessionID": session_id.as_deref().unwrap_or_default(),
+                                "error": e.to_string(),
+                            })
+                        );
+                    }
+                    match e {
+                        freedas_core::FreedasError::BudgetExceeded => return Ok(4),
+                        freedas_core::FreedasError::SandboxUnavailable(m) => {
+                            eprintln!("sandbox unavailable: {m}");
+                            return Ok(5);
+                        }
+                        _ => return Err(e.into()),
+                    }
                 }
-                Err(e) => return Err(e.into()),
             };
             // Name a fresh session from its first exchange.
             if fresh_session && want_title {

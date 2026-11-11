@@ -61,6 +61,7 @@ or `FREEDAS_EXPERIMENTAL_SANDBOX=false` to run bare.
 {"type":"tool.result","sessionID":"ses_...","tool":"bash","ok":false,"output":"no sandbox backend; refusing unsandboxed exec"}
 {"type":"permission.asked","sessionID":"ses_...","permissionID":"perm_0","action":"read","resource":".env"}
 {"type":"permission.replied","sessionID":"ses_...","permissionID":"perm_0","response":"reject"}
+{"type":"session.error","sessionID":"ses_...","error":"cancelled"}
 {"type":"session.completed","sessionID":"ses_...","completed":true,"timestamp":1760000000000}
 {"type":"result","sessionID":"ses_...","text":"final answer","completed":true,"blocked":[]}
 ```
