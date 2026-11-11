@@ -57,13 +57,19 @@ jobs:
       - run: cargo test --locked --workspace
 
   e2e:
-    name: e2e
-    runs-on: ubuntu-latest
+    name: e2e (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
-      # Headless runs require an OS sandbox backend; ubuntu needs bubblewrap.
-      - run: sudo apt-get update -qq && sudo apt-get install -y -qq bubblewrap
+      # Headless runs prefer an OS sandbox backend; ubuntu needs bubblewrap.
+      # macOS ships sandbox-exec, so this matrix covers both backends.
+      - if: runner.os == 'Linux'
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq bubblewrap
       - run: cargo build --locked -p freedas
       - run: FREEDAS_BIN=$PWD/target/debug/freedas bash scripts/e2e.sh
