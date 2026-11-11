@@ -11,7 +11,7 @@ import subprocess
 import html as H
 
 W = 848
-LEFT, BAR_W, ROW_H, BH = 245, 465, 28, 19
+LEFT, BAR_W, ROW_H, BH = 262, 448, 28, 19
 FONT = "ui-sans-serif,system-ui,-apple-system,'Segoe UI',Roboto,sans-serif"
 
 
@@ -33,7 +33,7 @@ def fmt(v, unit):
 
 # (title, unit, log, chip_override, rows[(label, value, is_fd, ghost)], note)
 LAUNCH = [
-    ("Spawn: `--version` / `--help`", "ms", True, None,
+    ("Spawn: `--version` / `--help`", "ms", True, "6.1\u00d7 vs Claude Code",
      [("freedas", 2.3, True, False), ("agentty", 2.6, False, False),
       ("zot", 13, False, False), ("Claude Code", 14, False, False),
       ("jcode", 17, False, False), ("Codex CLI", 77, False, False),
@@ -41,7 +41,7 @@ LAUNCH = [
       ("Aider", 1070, False, False), ("Gemini CLI", 2590, False, False)],
      "Median process spawn. agentty.org same-rig for its seven tools; zot/pi "
      "from graphwiz.ai (--help timing)."),
-    ("Interactive: launch \u2192 ready to type", "ms", True, None,
+    ("Interactive: launch \u2192 ready to type", "ms", True, "45\u00d7 vs Claude Code",
      [("freedas", 14, True, False), ("agentty", 47, False, False),
       ("jcode", 56, False, False), ("Forcefield", 334, False, False),
       ("Codex CLI", 402, False, False), ("Claude Code", 635, False, False),
@@ -49,7 +49,7 @@ LAUNCH = [
       ("opencode", 5190, False, False)],
      "agentty.org ready-to-type medians (median of 10, same machine); freedas "
      "= exec \u2192 first TUI byte; Forcefield = warm-launch p50."),
-    ("Warm launch p50 (isolated HOME)", "ms", True, None,
+    ("Warm launch p50 (isolated HOME)", "ms", True, "113\u00d7 vs Claude Code",
      [("freedas", 14, True, False), ("Codex CLI", 73, False, False),
       ("Grok CLI", 203, False, False), ("Forcefield", 334, False, False),
       ("Claude Code", 1588, False, False),
@@ -59,21 +59,21 @@ LAUNCH = [
 ]
 
 FOOTPRINT = [
-    ("Idle memory (RSS)", "mb", False, None,
+    ("Idle memory (RSS)", "mb", False, "10\u00d7 vs Claude Code",
      [("freedas", 15, True, False), ("agentty", 21, False, False),
       ("Aider", 74, False, False), ("jcode", 106, False, False),
       ("Claude Code", 152, False, False), ("Codex CLI", 152, False, False),
       ("Gemini CLI", 441, False, False), ("opencode", 651, False, False)],
      "RSS while waiting for input. agentty.org same-rig medians; freedas on "
      "the release build."),
-    ("Disk footprint", "mb", False, None,
+    ("Disk footprint", "mb", False, "20\u00d7 vs Claude Code",
      [("freedas", 16, True, False), ("agentty", 23, False, False),
       ("jcode", 163, False, False), ("Gemini CLI", 197, False, False),
       ("Claude Code", 325, False, False), ("opencode", 409, False, False),
       ("Codex CLI", 536, False, False), ("Aider", 653, False, False)],
      "Binary + required runtime. agentty.org values; freedas is one stripped "
      "binary, no bundled runtime."),
-    ("Per-prompt harness tax", "ms", True, None,
+    ("Per-prompt harness tax", "ms", True, "130\u00d7 vs Claude Code",
      [("freedas", 13, True, False), ("freedas (pre-lazy)", 80, False, False),
       ("Claude Code overhead", 1690, False, False),
       ("median model response", 3014, False, True)],
@@ -81,7 +81,7 @@ FOOTPRINT = [
      "TTFT-study median; freedas: full end-to-end run incl. lazy "
      "snapshot-skip."),
     ("Input tokens per trivial prompt", "tok", False,
-     "12.9\u00d7 leaner",
+     "12.9\u00d7 vs Claude Code",
      [("Pi \u00b7 no tools", 466, False, True),
       ("Claude Code --bare", 1265, False, True),
       ("freedas \u00b7 17 tools", 1350, True, False),
@@ -155,18 +155,19 @@ def render_chart(title, unit, log, chip_override, rows, note, C, y0):
             f'fill="{C["f2"] if is_fd else C["mut"]}" font-size="11.5" '
             f'font-weight="{lw}">{esc(fmt(val, unit))}</text>')
         if is_fd:
-            cx, cy = W - 30 - 66, ry + BH / 2
+            chip_w = len(chip_txt) * 6.4 + 18
+            cx, cy = W - 30 - chip_w / 2, ry + BH / 2
             out.append(
-                f'<rect x="{cx}" y="{cy-10}" width="66" height="20" rx="10" '
-                f'fill="{C["chip"]}"/>'
-                f'<text x="{cx+33}" y="{cy+4}" text-anchor="middle" '
+                f'<rect x="{cx-chip_w/2:.0f}" y="{cy-10}" width="{chip_w:.0f}" '
+                f'height="20" rx="10" fill="{C["chip"]}"/>'
+                f'<text x="{cx:.0f}" y="{cy+4}" text-anchor="middle" '
                 f'fill="{C["chip_t"]}" font-size="10.5" font-weight="700">'
                 f'{esc(chip_txt)}</text>')
     y += len(rows) * ROW_H + 6
     # wrap note into lines at ~95 chars; all lines render, height tracks them
     words, lines, cur = note.split(), [], ""
     for wd in words:
-        if len(cur) + len(wd) + 1 > 95:
+        if len(cur) + len(wd) + 1 > 86:
             lines.append(cur)
             cur = wd
         else:
@@ -217,17 +218,17 @@ for suffix, C in (("dark", DARK), ("light", LIGHT)):
     figure(C, LAUNCH,
            "freedas \u2014 launch benchmarks",
            "vs every published same-rig number \u00b7 lower is better",
-           str(DOCS / f"benchmarks-launch-{suffix}.svg"))
+           str(DOCS / f"benchmarks-launch-{suffix}-v3.svg"))
     figure(C, FOOTPRINT,
            "freedas \u2014 footprint & efficiency benchmarks",
            "vs every published same-rig number \u00b7 lower is better",
-           str(DOCS / f"benchmarks-footprint-{suffix}.svg"))
+           str(DOCS / f"benchmarks-footprint-{suffix}-v3.svg"))
 
 # Rasterize to 2x PNGs for GitHub (camo handles PNGs reliably).
 for stem in ("benchmarks-launch", "benchmarks-footprint"):
     for suffix in ("dark", "light"):
-        svg_p = DOCS / f"{stem}-{suffix}.svg"
-        png_p = DOCS / f"{stem}-{suffix}.png"
+        svg_p = DOCS / f"{stem}-{suffix}-v3.svg"
+        png_p = DOCS / f"{stem}-{suffix}-v3.png"
         subprocess.run(
             ["rsvg-convert", "-w", "1696", str(svg_p), "-o", str(png_p)],
             check=True)
