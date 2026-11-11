@@ -8,10 +8,10 @@ Free, self-hosted coding agent in Rust. You run it on your machine, point it at 
 
 ```sh
 ./install.sh
-freedas
+fd                               # open the terminal UI (shell shortcut for freedas)
 ```
 
-No sudo. No account. The binary lands in `~/.freedas/bin` and the TUI opens in your current repo.
+No sudo. No account. The binary lands in `~/.freedas/bin`, the installer adds a `fd` shell function to your rc file, and the TUI opens in your current repo. `fd` passes every argument through, so `fd --worktree` works exactly like `freedas --worktree`.
 
 ## What this is
 
@@ -45,12 +45,12 @@ External launch numbers come from [agentty.org](https://agentty.org/benchmarks/)
 ## Install in one minute
 
 ```sh
-./install.sh                     # installs to ~/.freedas/bin, adds it to PATH
+./install.sh                     # installs to ~/.freedas/bin, adds it to PATH, adds the fd shortcut
 freedas --version                # verify the binary
-freedas                          # open the terminal UI
+fd                              # open the terminal UI
 ```
 
-The installer picks the asset matching your OS and CPU from the cargo-dist triples in `Cargo.toml`, verifies sha256 when the release publishes one, and adds a `fd` shell function so `fd` opens the UI even when fd-find owns `fd` on PATH.
+The installer picks the asset matching your OS and CPU from the cargo-dist triples in `Cargo.toml`, verifies sha256 when the release publishes one, and defines `fd` as a shell function (fish and POSIX forms) so it still opens Freedas when fd-find owns `fd` on PATH. Reopen the terminal after install so the function loads.
 
 Build from source instead:
 
@@ -63,7 +63,7 @@ Native Windows is not a release target. You run the Linux artifacts inside WSL.
 
 ## First run
 
-Open a terminal inside a git repository and run `freedas`. The TUI starts a local session against your configured provider.
+Open a terminal inside a git repository and run `fd`. The TUI starts a local session against your configured provider. (`freedas` is the same binary when you need the full name in scripts.)
 
 ```sh
 freedas providers login anthropic   # reads env first, stores to credentials.json mode 0600
