@@ -628,6 +628,12 @@ fn spawn_prompt(
                     "completed": result.completed,
                     "text": result.text,
                 }),
+                // Same terminal types as the SSE server: stopped on cancel,
+                // error on everything else.
+                Err(freedas_core::FreedasError::Cancelled) => json!({
+                    "type": "session.stopped",
+                    "sessionID": session_id,
+                }),
                 Err(error) => json!({
                     "type": "session.error",
                     "sessionID": session_id,
