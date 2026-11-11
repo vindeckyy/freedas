@@ -2,7 +2,8 @@
 # End-to-end parity scenarios (plan §33.2). Run against the fake provider:
 #   cargo build && FREEDAS_TEST_PROVIDER=fake scripts/e2e.sh
 set -u
-BIN=${FREEDAS_BIN:-./target/debug/freedas}
+# Absolute path: checks run from inside mktemp project dirs.
+BIN=$(cd "$(dirname "${FREEDAS_BIN:-./target/debug/freedas}")" && pwd)/$(basename "${FREEDAS_BIN:-./target/debug/freedas}")
 export FREEDAS_TEST_PROVIDER=fake
 export FREEDAS_DATA=$(mktemp -d)/data
 export FREEDAS_CONFIG_DIR=$(mktemp -d)/config
