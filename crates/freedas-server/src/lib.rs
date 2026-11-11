@@ -474,7 +474,10 @@ async fn spa() -> impl axum::response::IntoResponse {
 }
 
 pub fn app_with_auth(db: Arc<Db>, paths: Paths, auth: Auth) -> Router {
-    let state = AppState::new(db, paths);
+    router(AppState::new(db, paths), auth)
+}
+
+fn router(state: AppState, auth: Auth) -> Router {
     Router::new()
         .route("/", get(spa))
         .route("/global/health", get(health))
@@ -1702,17 +1705,48 @@ async fn sse_events(
 
 /// Serve with CORS for the given origins (empty = no CORS headers).
 pub async fn serve_with_cors(host: &str, port: u16, origins: Vec<String>) -> std::io::Result<()> {
+    let host = host.to_string();
+    serve_on_own_runtime(move || serve_cors(host, port, origins))
+}
+
+/// Run the server on a runtime of its own. The agent run parks on a
+/// permission answer, and that wait must not hold the only worker of a
+/// single-threaded runtime: the server would stop answering every request,
+/// including the permission reply it is waiting for.
+fn serve_on_own_runtime<F, Fut>(run: F) -> std::io::Result<()>
+where
+    F: FnOnce() -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = std::io::Result<()>>,
+{
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let result = match tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+        {
+            Ok(runtime) => runtime.block_on(run()),
+            Err(error) => Err(std::io::Error::other(error.to_string())),
+        };
+        let _ = tx.send(result);
+    });
+    rx.recv()
+        .unwrap_or_else(|_| Err(std::io::Error::other("server thread ended")))
+}
+
+async fn serve_cors(host: String, port: u16, origins: Vec<String>) -> std::io::Result<()> {
     let paths = Paths::resolve(std::env::current_dir().unwrap_or_default());
     let db = Arc::new(Db::open(&paths.db_path()).expect("open db"));
-    let listener = tokio::net::TcpListener::bind((host, port)).await?;
+    let listener = tokio::net::TcpListener::bind((host.as_str(), port)).await?;
     let addr = listener.local_addr()?;
-    let auth = Auth::from_env(is_loopback_host(host));
-    if !is_loopback_host(host) {
+    let auth = Auth::from_env(is_loopback_host(&host));
+    if !is_loopback_host(&host) {
         eprintln!(
             "freedas server: WARNING plain HTTP on a non-loopback bind sends the Bearer token in cleartext; put a TLS-terminating proxy or SSH tunnel in front"
         );
     }
-    let app = app_with_auth(db, paths, auth).layer(axum::middleware::from_fn(
+    let state = AppState::new(db, paths);
+    let shutdown = state.clone();
+    let app = router(state, auth).layer(axum::middleware::from_fn(
         move |req: axum::extract::Request, next: axum::middleware::Next| {
             let origins = origins.clone();
             async move {
@@ -1749,13 +1783,13 @@ pub async fn serve_with_cors(host: &str, port: u16, origins: Vec<String>) -> std
     ));
     println!("freedas server on http://{addr}");
     axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
+        .with_graceful_shutdown(shutdown_signal(shutdown))
         .await
 }
 
 /// Resolves on Ctrl-C or SIGTERM so the listener stops accepting, in-flight
 /// requests drain, and the process exits 0 under systemd/launchd.
-async fn shutdown_signal() {
+async fn shutdown_signal(state: AppState) {
     #[cfg(unix)]
     {
         let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
@@ -1769,22 +1803,45 @@ async fn shutdown_signal() {
     {
         let _ = tokio::signal::ctrl_c().await;
     }
+    // A run parked on a permission answer holds a blocking worker: the
+    // runtime waits for it, so the process would hang until the ask timed
+    // out. Cancel the runs and let the parked asks go.
+    let sessions: Vec<String> = state
+        .aborts
+        .lock()
+        .expect("aborts")
+        .keys()
+        .cloned()
+        .collect();
+    for id in &sessions {
+        drain_pending(&state.pending_perms, id);
+    }
+    for token in state.aborts.lock().expect("aborts").values() {
+        token.cancel();
+    }
 }
 
 pub async fn serve(host: &str, port: u16) -> std::io::Result<()> {
+    let host = host.to_string();
+    serve_on_own_runtime(move || serve_plain(host, port))
+}
+
+async fn serve_plain(host: String, port: u16) -> std::io::Result<()> {
     let paths = Paths::resolve(std::env::current_dir().unwrap_or_default());
     let db = Arc::new(Db::open(&paths.db_path()).expect("open db"));
-    let listener = tokio::net::TcpListener::bind((host, port)).await?;
+    let listener = tokio::net::TcpListener::bind((host.as_str(), port)).await?;
     let addr = listener.local_addr()?;
-    if !is_loopback_host(host) {
+    if !is_loopback_host(&host) {
         eprintln!(
             "freedas server: WARNING plain HTTP on a non-loopback bind sends the Bearer token in cleartext; put a TLS-terminating proxy or SSH tunnel in front"
         );
     }
-    let app = app_with_auth(db, paths, Auth::from_env(is_loopback_host(host)));
+    let state = AppState::new(db, paths);
+    let shutdown = state.clone();
+    let app = router(state, Auth::from_env(is_loopback_host(&host)));
     println!("freedas server on http://{addr}");
     axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
+        .with_graceful_shutdown(shutdown_signal(shutdown))
         .await
 }
 

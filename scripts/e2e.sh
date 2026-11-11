@@ -134,6 +134,21 @@ check "attach started"   "echo '$ATTACH_OUT' | grep -q 'session.started'"
 check "attach completed" "echo '$ATTACH_OUT' | grep -q 'session.completed'"
 check "attach usage"     "echo '$ATTACH_OUT' | grep -q '\"type\":\"usage\"'"
 check "attach bad sid"   "$BIN run --attach http://127.0.0.1:$PORT x --session ses_NOPE --format json 2>&1 | grep -qi 'not found'"
+# A client that connects while a permission is parked must be told about it:
+# the ask is not in the event replay of a fresh connection.
+SID3=$(curl -sf -X POST http://127.0.0.1:$PORT/session -H 'content-type: application/json' -d '{}' | grep -o 'ses_[A-Z0-9]*')
+curl -sf -X POST "http://127.0.0.1:$PORT/session/$SID3/prompt_async" -H 'content-type: application/json' -d '{"text":"READ:.env"}' >/dev/null
+for _ in 1 2 3 4 5; do
+  curl -sN --max-time 2 http://127.0.0.1:$PORT/event > "$D/sse2.log"
+  grep -q 'permission.asked' "$D/sse2.log" && break
+done
+check "sse parked permission" "grep -q 'permission.asked' '$D/sse2.log'"
+# Answer the parked ask so the run ends and the server can shut down.
+PSID=$(grep -o 'ses_[A-Z0-9]*' "$D/sse2.log" | head -1)
+PPERM=$(grep -o 'perm_[A-Z0-9]*' "$D/sse2.log" | head -1)
+if [ -n "$PPERM" ]; then
+  curl -sf -X POST "http://127.0.0.1:$PORT/session/$PSID/permissions/$PPERM" -H 'content-type: application/json' -d '{"response":"reject"}' >/dev/null 2>&1
+fi
 kill $SRVPID 2>/dev/null
 
 echo "== 11. rules block =="
