@@ -105,6 +105,8 @@ jobs:
       # The gateway meters against the same tables; without a database its
       # database-backed test skips.
       - run: cargo test --locked -p freedas-gateway
+      # The sandbox runner leases rows from the same tables.
+      - run: cargo test --locked -p freedas-sandbox-runner
 
   e2e:
     name: e2e (${{ matrix.os }})
