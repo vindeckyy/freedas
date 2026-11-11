@@ -132,6 +132,7 @@ ATTACH_OUT=$($BIN run --attach "http://127.0.0.1:$PORT" "ECHO:attach" --auto --f
 check "attach started"   "echo '$ATTACH_OUT' | grep -q 'session.started'"
 check "attach completed" "echo '$ATTACH_OUT' | grep -q 'session.completed'"
 check "attach usage"     "echo '$ATTACH_OUT' | grep -q '\"type\":\"usage\"'"
+check "attach bad sid"   "$BIN run --attach http://127.0.0.1:$PORT x --session ses_NOPE --format json 2>&1 | grep -qi 'not found'"
 kill $SRVPID 2>/dev/null
 
 echo "== 11. rules block =="
