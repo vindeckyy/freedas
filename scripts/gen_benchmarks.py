@@ -84,9 +84,8 @@ FOOTPRINT = [
      "Binary + required runtime. agentty.org values; freedas is one stripped "
      "binary, no bundled runtime."),
     ("Per-prompt harness tax", "ms", True,
-     (("Per-prompt: 130\u00d7 faster than Claude Code \u00b7 1690ms\u219213ms", "a"),
-      ("Per-prompt: 6\u00d7 faster than old freedas \u00b7 80ms\u219213ms", "c")),
-     [("freedas", 13, True, False), ("freedas (pre-lazy)", 80, False, False),
+     (("Per-prompt: 130\u00d7 faster than Claude Code \u00b7 1690ms\u219213ms", "a"),),
+     [("freedas", 13, True, False),
       ("Claude Code overhead", 1690, False, False),
       ("median model response", 3014, False, True)],
      "Overhead beyond model time per trivial prompt. Claude Code: crewshal "
@@ -232,17 +231,17 @@ for suffix, C in (("dark", DARK), ("light", LIGHT)):
     figure(C, LAUNCH,
            "freedas \u2014 launch benchmarks",
            "vs every published same-rig number \u00b7 lower is better",
-           str(DOCS / f"benchmarks-launch-{suffix}-v6.svg"))
+           str(DOCS / f"benchmarks-launch-{suffix}-v7.svg"))
     figure(C, FOOTPRINT,
            "freedas \u2014 footprint & efficiency benchmarks",
            "vs every published same-rig number \u00b7 lower is better",
-           str(DOCS / f"benchmarks-footprint-{suffix}-v6.svg"))
+           str(DOCS / f"benchmarks-footprint-{suffix}-v7.svg"))
 
 # Rasterize to 2x PNGs for GitHub (camo handles PNGs reliably).
 for stem in ("benchmarks-launch", "benchmarks-footprint"):
     for suffix in ("dark", "light"):
-        svg_p = DOCS / f"{stem}-{suffix}-v6.svg"
-        png_p = DOCS / f"{stem}-{suffix}-v6.png"
+        svg_p = DOCS / f"{stem}-{suffix}-v7.svg"
+        png_p = DOCS / f"{stem}-{suffix}-v7.png"
         subprocess.run(
             ["rsvg-convert", "-w", "1696", str(svg_p), "-o", str(png_p)],
             check=True)
