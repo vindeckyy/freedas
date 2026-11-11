@@ -94,15 +94,15 @@ check "import ok"           "$BIN import /tmp/fexp.json 2>/dev/null | grep -q 'i
 check "session list"        "$BIN session list | grep -q '$SID'"
 check "session rename"      "$BIN session rename '$SID' renamed-e2e >/dev/null 2>&1 && $BIN session list | grep -q renamed-e2e"
 check "agent list"          "$BIN agent list | grep -q build"
-check "skill list runs"     "$BIN skill list >/dev/null 2>&1 || true"
+check "skill list runs"     "$BIN skill list >/dev/null 2>&1"
 
 echo "== 8. mcp (config only) =="
-check "mcp list" "$BIN mcp list >/dev/null 2>&1 || true"
+check "mcp list" "$BIN mcp list >/dev/null 2>&1"
 
 echo "== 9. memory =="
 cd "$D"
 $BIN run "remember that the api uses graphql" --format json >/dev/null 2>&1 || true
-check "memory list cmd" "$BIN memory list >/dev/null 2>&1 || true"
+check "memory list cmd" "$BIN memory list >/dev/null 2>&1"
 
 echo "== 10. server =="
 PORT=4188
