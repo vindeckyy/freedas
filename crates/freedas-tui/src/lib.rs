@@ -759,8 +759,9 @@ fn open_picker(
                         .chars()
                         .take(80)
                         .collect();
+                    let child = s.parent_id.is_some();
                     popup::row(
-                        format!("{} {title}", s.id),
+                        format!("{}{} {title}", if child { "↳ " } else { "" }, s.id),
                         format!("{title} — {}", s.id),
                         s.id,
                     )
@@ -2905,8 +2906,13 @@ fn event_loop(
                                         let target = it.next().unwrap_or("");
                                         if args.is_empty() {
                                             for s in sessions {
+                                                let mark = if s.parent_id.is_some() {
+                                                    "↳"
+                                                } else {
+                                                    "·"
+                                                };
                                                 transcript.push(format!(
-                                                    "· {} [{}] {}",
+                                                    "{mark} {} [{}] {}",
                                                     s.id, s.agent, s.title
                                                 ));
                                             }
