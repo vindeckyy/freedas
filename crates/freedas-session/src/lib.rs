@@ -1370,10 +1370,10 @@ impl Runner {
                 // re-enters the loop until max_attempts, instead of erroring.
                 if self.config.standards.enabled && edited_files > 0 {
                     let commands = freedas_standards::gate_commands(&project_root, &self.paths);
-                    if commands.is_empty() {
-                        if let Some(p) = &progress {
-                            p("\u{1}standards gate skipped: no detectable checks".into());
-                        }
+                    if commands.is_empty()
+                        && let Some(p) = &progress
+                    {
+                        p("\u{1}standards gate skipped: no detectable checks".into());
                     }
                     if !commands.is_empty() && self.config.standards.block_on_failure {
                         if let Some(p) = &progress {

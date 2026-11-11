@@ -1116,10 +1116,8 @@ pub fn load(paths: &Paths, disable_project: bool) -> Result<Config, FreedasError
                     let mut layer = settings.clone();
                     // The unsigned cache must never be the channel that turns
                     // on code trust or picks the bind/exec posture.
-                    for key in ["trust_project_code"] {
-                        if let Some(o) = layer.as_object_mut() {
-                            o.remove(key);
-                        }
+                    if let Some(o) = layer.as_object_mut() {
+                        o.remove("trust_project_code");
                     }
                     deep_merge(&mut merged, layer);
                 }

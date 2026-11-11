@@ -1156,6 +1156,8 @@ fn check_or_record_trust_in(
     let path = fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     let hash = hash_file(&path)?;
     let key = path.to_string_lossy().into_owned();
+    #[cfg(test)]
+    let _guard = trust_serial();
     let mut trusted = read_trust(store);
     if trusted.get(&key).is_some_and(|known| known == &hash) {
         return Ok((path, hash));
@@ -1253,6 +1255,16 @@ static TEST_TRUST_DIR: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceL
 #[cfg(test)]
 static TEST_TRUST_LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
 
+/// Serializes every read-modify-write on the shared test store; without it
+/// `trust()` and the install/prune writers lose each other's entries.
+#[cfg(test)]
+fn trust_serial() -> std::sync::MutexGuard<'static, ()> {
+    TEST_TRUST_LOCK
+        .get_or_init(|| std::sync::Mutex::new(()))
+        .lock()
+        .unwrap()
+}
+
 #[cfg(test)]
 fn test_trust_store() -> PathBuf {
     TEST_TRUST_DIR
@@ -1273,10 +1285,7 @@ fn test_trust_store() -> PathBuf {
 /// Record `path`'s current hash as approved in the shared test trust store.
 #[cfg(test)]
 fn trust(path: &Path) {
-    let _guard = TEST_TRUST_LOCK
-        .get_or_init(|| std::sync::Mutex::new(()))
-        .lock()
-        .unwrap();
+    let _guard = trust_serial();
     let store = test_trust_store();
     let entry = fs::canonicalize(path).unwrap();
     let hash = hash_file(&entry).unwrap();
@@ -1921,6 +1930,8 @@ fn record_installed_trust(dir: &Path) {
         .to_string_lossy()
         .into_owned();
     let store = trust_file();
+    #[cfg(test)]
+    let _guard = trust_serial();
     let mut trusted = read_trust(&store);
     trusted.insert(key, hash);
     let _ = write_trust(&store, &trusted);
@@ -1932,6 +1943,8 @@ pub fn prune_trust(dir: &Path) {
     let canon = fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
     let prefix = canon.to_string_lossy().to_string();
     let store = trust_file();
+    #[cfg(test)]
+    let _guard = trust_serial();
     let mut trusted = read_trust(&store);
     let before = trusted.len();
     trusted.retain(|key, _| !key.starts_with(&prefix));

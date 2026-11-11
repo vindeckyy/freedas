@@ -620,7 +620,7 @@ pub fn scan_shell(command: &str) -> ShellScan {
         }
         for hit in dynamic_token_markers(&shell_tokens(cmd)) {
             scan.needs_ask = true;
-            if !scan.dynamic.iter().any(|d| *d == hit) {
+            if !scan.dynamic.contains(&hit) {
                 scan.dynamic.push(hit);
             }
         }

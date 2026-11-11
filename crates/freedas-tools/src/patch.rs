@@ -190,12 +190,12 @@ impl Tool for ApplyPatchTool {
         // Drift between permission checks and the real `patch` spawn is a
         // lost-update the binary cannot see; fail like a stale read.
         for (abs, h) in &target_hashes {
-            if let Ok(bytes) = tokio::fs::read(abs).await {
-                if crate::hash_bytes(&bytes) != *h {
-                    return Err(FreedasError::StaleRead(
-                        "patch target changed before apply".into(),
-                    ));
-                }
+            if let Ok(bytes) = tokio::fs::read(abs).await
+                && crate::hash_bytes(&bytes) != *h
+            {
+                return Err(FreedasError::StaleRead(
+                    "patch target changed before apply".into(),
+                ));
             }
         }
         let unified = codex_to_unified(&ops, &ctx.project_root)?;

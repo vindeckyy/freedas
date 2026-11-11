@@ -451,9 +451,8 @@ pub async fn run(cli: Cli, project_root: PathBuf) -> Result<i32, Box<dyn std::er
             }
             report_session_metadata(&p, &d, &r, &project_display, &prompt_excerpt, started_at)
                 .await;
-            // Exit 3 when a blocked action stopped the task from finishing;
-            // a run that recovered from a rejected tool still exits 0.
-            Ok(blocked_exit_code(&r.blocked, r.completed))
+            // Exit 3 whenever a blocked action was auto-rejected.
+            Ok(blocked_exit_code(&r.blocked))
         }
         Some(Commands::Session { command }) => match command {
             crate::SessionCommands::List => {
@@ -2542,18 +2541,13 @@ async fn attach_run(opts: AttachRun) -> Result<i32, Box<dyn std::error::Error>> 
     } else {
         eprintln!("session {session_id}");
     }
-    // Exit 3 when blocked actions stopped the task from finishing.
-    Ok(blocked_exit_code(&blocked, completed))
+    // Exit 3 whenever a blocked action was auto-rejected (docs: headless.md).
+    Ok(blocked_exit_code(&blocked))
 }
 
-/// `3` when a blocked action stopped the task from finishing; a run that
-/// recovered around a rejected tool still exits 0.
-fn blocked_exit_code(blocked: &[String], completed: bool) -> i32 {
-    if blocked.is_empty() || completed {
-        0
-    } else {
-        3
-    }
+/// `3` whenever a blocked action was auto-rejected.
+fn blocked_exit_code(blocked: &[String]) -> i32 {
+    if blocked.is_empty() { 0 } else { 3 }
 }
 
 /// Read a config file as JSONC. A missing file is an empty object; a file that
@@ -2739,6 +2733,15 @@ model or vendor is not a reason to prefer a model.
 - If a run fails, retry it or narrow the task. Do not add a model flag.
 ";
 
+/// Strip control characters so an untrusted string cannot forge output lines.
+fn flat(text: &str) -> String {
+    text.chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect::<String>()
+        .trim()
+        .to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2769,9 +2772,8 @@ mod tests {
     #[test]
     fn blocked_runs_exit_3() {
         let blocked = vec!["bash: rm -rf /".to_string()];
-        assert_eq!(blocked_exit_code(&blocked, false), 3);
-        assert_eq!(blocked_exit_code(&blocked, true), 0);
-        assert_eq!(blocked_exit_code(&[], false), 0);
+        assert_eq!(blocked_exit_code(&blocked), 3);
+        assert_eq!(blocked_exit_code(&[]), 0);
     }
 
     #[test]
@@ -2827,13 +2829,4 @@ mod tests {
         );
         std::fs::remove_dir_all(&dir).ok();
     }
-}
-
-/// Strip control characters so an untrusted string cannot forge output lines.
-fn flat(text: &str) -> String {
-    text.chars()
-        .map(|c| if c.is_control() { ' ' } else { c })
-        .collect::<String>()
-        .trim()
-        .to_string()
 }

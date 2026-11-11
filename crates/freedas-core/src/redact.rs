@@ -111,7 +111,17 @@ pub fn redact_value(value: &serde_json::Value) -> serde_json::Value {
         serde_json::Value::Object(o) => serde_json::Value::Object(
             o.iter()
                 .map(|(k, v)| {
-                    if is_secret_key(k) {
+                    // `session`/`sessionID` keys hold session *records* in
+                    // exports; only a scalar value can carry a credential.
+                    let secret = if k.to_ascii_lowercase().contains("session") {
+                        !matches!(
+                            v,
+                            serde_json::Value::Object(_) | serde_json::Value::Array(_)
+                        )
+                    } else {
+                        is_secret_key(k)
+                    };
+                    if secret {
                         (k.clone(), serde_json::Value::String("[REDACTED]".into()))
                     } else {
                         (k.clone(), redact_value(v))

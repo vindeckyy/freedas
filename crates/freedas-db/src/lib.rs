@@ -12,6 +12,9 @@ pub struct Db {
     conn: Mutex<Connection>,
 }
 
+/// (scope, kind, text, confidence, project_id) columns of one memory row.
+pub type MemoryRow = (String, String, String, String, Option<String>);
+
 impl std::fmt::Debug for Db {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Db").finish_non_exhaustive()
@@ -820,10 +823,7 @@ impl Db {
     }
 
     /// (scope, kind, text, confidence, project_id) for one memory row.
-    pub fn get_memory(
-        &self,
-        id: &str,
-    ) -> Result<Option<(String, String, String, String, Option<String>)>> {
+    pub fn get_memory(&self, id: &str) -> Result<Option<MemoryRow>> {
         let conn = self.lock();
         let mut stmt = conn.prepare(
             "SELECT scope, kind, text, confidence, project_id FROM memories WHERE id = ?1",
