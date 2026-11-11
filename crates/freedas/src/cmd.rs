@@ -210,11 +210,24 @@ pub async fn run(cli: Cli, project_root: PathBuf) -> Result<i32, Box<dyn std::er
             }
             // A configured default applies when the flag is absent.
             let variant = variant.or_else(|| cfg.variant.clone());
-            // Attach files and piped stdin to the message.
+            // Attach files and piped stdin to the message. Each source is
+            // capped — a multi-MB log piped in should not go verbatim into the
+            // prompt (and the provider bill).
+            const PROMPT_SOURCE_CAP: usize = 200_000;
+            let cap_source = |text: &str| -> String {
+                if text.len() <= PROMPT_SOURCE_CAP {
+                    return text.to_string();
+                }
+                let mut end = PROMPT_SOURCE_CAP;
+                while !text.is_char_boundary(end) {
+                    end -= 1;
+                }
+                format!("{}\n[truncated {} bytes]", &text[..end], text.len() - end)
+            };
             let mut prompt = task.clone();
             for f in &file {
                 match std::fs::read_to_string(f) {
-                    Ok(c) => prompt.push_str(&format!("\n\n--- {f} ---\n{c}")),
+                    Ok(c) => prompt.push_str(&format!("\n\n--- {f} ---\n{}", cap_source(&c))),
                     Err(e) => {
                         return Err(format!("cannot read {}: {e}", scrub_home(f)).into());
                     }
@@ -224,7 +237,7 @@ pub async fn run(cli: Cli, project_root: PathBuf) -> Result<i32, Box<dyn std::er
                 use std::io::Read;
                 let mut buf = String::new();
                 if std::io::stdin().read_to_string(&mut buf).is_ok() && !buf.trim().is_empty() {
-                    prompt.push_str(&format!("\n\n--- stdin ---\n{buf}"));
+                    prompt.push_str(&format!("\n\n--- stdin ---\n{}", cap_source(&buf)));
                 }
             }
 

@@ -295,10 +295,15 @@ pub fn gate_failure_message(result: &GateResult) -> String {
 
 fn crate_trunc(text: &str, max: usize) -> (String, bool) {
     if text.len() <= max {
-        (text.to_string(), false)
-    } else {
-        (format!("{}\n[truncated]", &text[..max]), true)
+        return (text.to_string(), false);
     }
+    // `max` is a byte limit; multi-byte UTF-8 can straddle it — walk back to
+    // the nearest boundary instead of panicking on the slice.
+    let mut end = max;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    (format!("{}\n[truncated]", &text[..end]), true)
 }
 
 /// Rubric for `/standards-review`: over-engineering, dead code, duplication.
