@@ -539,6 +539,16 @@ pub mod fake {
             _cancel: tokio_util::sync::CancellationToken,
         ) -> Result<BoxStream, ProviderError> {
             let mut events = Vec::new();
+            if std::env::var_os("FREEDAS_DUMP_REQUEST").is_some() {
+                let system_bytes: usize = request.system.iter().map(String::len).sum();
+                eprintln!(
+                    "request: system={}B messages={}B tools={}B ({} tools)",
+                    system_bytes,
+                    serde_json::to_string(&request.messages).map_or(0, |s| s.len()),
+                    serde_json::to_string(&request.tools).map_or(0, |s| s.len()),
+                    request.tools.len(),
+                );
+            }
             events.push(Ok(ChatEvent::Start));
             // Only a user turn is a prompt: tool results are transcript, not
             // instructions, and a `WRITE:`/`READ:` inside one must not run.

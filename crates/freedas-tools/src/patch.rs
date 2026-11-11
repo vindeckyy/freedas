@@ -683,6 +683,7 @@ mod tests {
             approver: None,
             db: None,
             project_id: None,
+            prefetch: None,
         }
     }
 

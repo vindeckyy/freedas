@@ -263,15 +263,33 @@ fn restore_terminal() {
 }
 
 fn branch_of(root: &std::path::Path) -> Option<String> {
-    let out = std::process::Command::new("git")
-        .current_dir(root)
-        .args(["rev-parse", "--abbrev-ref", "HEAD"])
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    let name = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    // Read HEAD directly: a `git rev-parse` subprocess costs ~10ms, which is
+    // most of the time-to-first-frame budget on launch.
+    let dotgit = root.join(".git");
+    let head = if dotgit.is_file() {
+        // Worktree/submodule: `.git` is a file pointing at the real gitdir.
+        let body = std::fs::read_to_string(&dotgit).ok()?;
+        let dir = body.trim().strip_prefix("gitdir:")?.trim();
+        let dir = std::path::Path::new(dir);
+        let dir = if dir.is_absolute() {
+            dir.to_path_buf()
+        } else {
+            root.join(dir)
+        };
+        dir.join("HEAD")
+    } else {
+        dotgit.join("HEAD")
+    };
+    let head = std::fs::read_to_string(head).ok()?;
+    let head = head.trim();
+    let name = head
+        .strip_prefix("ref: refs/heads/")
+        .map(str::to_string)
+        .or_else(|| {
+            head.chars()
+                .all(|c| c.is_ascii_hexdigit())
+                .then(|| "detached".to_string())
+        })?;
     (!name.is_empty()).then_some(name)
 }
 
@@ -416,16 +434,33 @@ pub fn run_with(project_root: std::path::PathBuf) -> std::io::Result<()> {
 }
 
 pub fn run_with_opts(opts: TuiOptions) -> std::io::Result<()> {
+    let timing = std::env::var_os("FREEDAS_TUI_TIMING").is_some();
+    let t0 = Instant::now();
     let paths = Paths::resolve(opts.project_root.clone());
+    if timing {
+        eprintln!("paths: {:?}", t0.elapsed());
+    }
     let db = Arc::new(Db::open(&paths.db_path()).map_err(|e| {
         std::io::Error::other(format!("cannot open {}: {e}", paths.db_path().display()))
     })?);
+    if timing {
+        eprintln!("db: {:?}", t0.elapsed());
+    }
     let cfg = freedas_core::config::load(&paths, false)
         .map_err(|e| std::io::Error::other(format!("config: {e}")))?;
+    if timing {
+        eprintln!("cfg: {:?}", t0.elapsed());
+    }
     let project_id = db
         .ensure_project(&opts.project_root)
         .map_err(|e| std::io::Error::other(format!("cannot register project: {e}")))?;
+    if timing {
+        eprintln!("ensure_project: {:?}", t0.elapsed());
+    }
     let mut terminal = init_terminal();
+    if timing {
+        eprintln!("terminal: {:?}", t0.elapsed());
+    }
     let result = event_loop(&mut terminal, db, paths, cfg, project_id, opts);
     restore_terminal();
     result
@@ -1050,10 +1085,6 @@ fn event_loop(
         cfg.clone(),
         freedas_catalog::builtin_catalog(),
     ));
-    let _rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .map_err(|e| std::io::Error::other(format!("cannot start runtime: {e}")))?;
     // Permission prompts from the runner worker thread reach the input loop
     // over this pair; `ask` blocks the worker until a keypress replies. The
     // receiver is optional so exit can drop it and unblock the approver.
@@ -1192,10 +1223,18 @@ fn event_loop(
         cfg.permission_mode
     };
     let (mut auto, mut manual) = permission_mode.flags();
+    let timing = std::env::var_os("FREEDAS_TUI_TIMING").is_some();
+    let t0 = Instant::now();
     let mut commands = discover_commands(&project_root, &paths, &cfg.skills);
+    if timing {
+        eprintln!("discover_commands: {:?}", t0.elapsed());
+    }
     let mut project_id = project_id;
     let mut transcript = Transcript::new();
     let mut branch = branch_of(&project_root).unwrap_or_else(|| "no git".to_string());
+    if timing {
+        eprintln!("branch: {:?}", t0.elapsed());
+    }
     let mut usage = usage_of(&db, &project_id);
     let mut context_pct: Option<u8> = None;
     let mut history: Vec<String> = Vec::new();

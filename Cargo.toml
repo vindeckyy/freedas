@@ -75,6 +75,12 @@ chromiumoxide = "0.9"
 tempfile = "3"
 insta = "1"
 
+[profile.release]
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+strip = "symbols"
+
 [workspace.metadata.dist]
 cargo-dist-version = "0.34"
 installers = ["shell"]

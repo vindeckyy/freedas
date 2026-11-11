@@ -20,6 +20,92 @@ pub async fn git(args: &[&str], cwd: &Path) -> Result<std::process::Output, std:
         .await
 }
 
+/// Directories excluded from snapshots. Written to `core.excludesFile` and
+/// re-applied by the restore/feasibility walkers so they agree with `git add`.
+const SNAPSHOT_EXCLUDE_DIRS: &[&str] = &[
+    "target",
+    "node_modules",
+    ".venv",
+    "venv",
+    "dist",
+    "build",
+    ".next",
+    "__pycache__",
+    ".pytest_cache",
+];
+
+/// `git add -A` hashes every unignored file; over these caps hashing alone
+/// stalls a run for minutes while looking hung, so the snapshot is skipped.
+const MAX_SNAPSHOT_FILES: u64 = 50_000;
+const MAX_SNAPSHOT_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+
+/// One snapshot git command may still crawl a pathological filesystem (network
+/// mount, iCloud stubs). Bound it the same way `prune_snapshot_history` bounds
+/// maintenance: a slow repo must not stall the run.
+const SNAPSHOT_CMD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// Reason a project cannot be snapshotted quickly, or `None` when it can.
+///
+/// Two checks run before any git command: the shadow store must not sit inside
+/// the tree it snapshots (`git add -A` would re-ingest every prior snapshot's
+/// loose objects — quadratic churn that never finishes), and the tree must
+/// stay under the file/byte caps. The file walk early-exits at the caps, so it
+/// is fast even on huge roots.
+pub fn snapshot_blocker(data_dir: &Path, project: &Path) -> Option<String> {
+    // Canonicalize the deepest existing ancestor so not-yet-created suffixes
+    // still compare correctly against a canonical project root.
+    fn canon_deep(p: &Path) -> PathBuf {
+        match p.canonicalize() {
+            Ok(p) => p,
+            Err(_) => match p.parent() {
+                Some(parent) => canon_deep(parent).join(p.file_name().unwrap_or_default()),
+                None => p.to_path_buf(),
+            },
+        }
+    }
+    let project = canon_deep(project);
+    let store_root = canon_deep(&data_dir.join("snapshots"));
+    if project.starts_with(&store_root) || store_root.starts_with(&project) {
+        return Some(format!(
+            "snapshot store {} is inside the project root",
+            store_root.display()
+        ));
+    }
+    let mut files = 0u64;
+    let mut bytes = 0u64;
+    for entry in ignore::WalkBuilder::new(&project)
+        .hidden(false)
+        .git_ignore(true)
+        .require_git(false)
+        .filter_entry(|e| {
+            e.depth() == 0
+                || !e.file_type().is_some_and(|t| t.is_dir())
+                || (e.file_name().to_str() != Some(".git")
+                    && !e
+                        .file_name()
+                        .to_str()
+                        .is_some_and(|n| SNAPSHOT_EXCLUDE_DIRS.contains(&n)))
+        })
+        .build()
+        .flatten()
+    {
+        let is_entry = entry
+            .file_type()
+            .is_some_and(|t| t.is_file() || t.is_symlink());
+        if !is_entry {
+            continue;
+        }
+        files += 1;
+        bytes += entry.metadata().map(|m| m.len()).unwrap_or(0);
+        if files > MAX_SNAPSHOT_FILES || bytes > MAX_SNAPSHOT_BYTES {
+            return Some(format!(
+                "project tree too large to snapshot ({files} files, {bytes} bytes)"
+            ));
+        }
+    }
+    None
+}
+
 pub async fn git_text(args: &[&str], cwd: &Path) -> Result<String, String> {
     let out = git(args, cwd).await.map_err(|e| e.to_string())?;
     if !out.status.success() {
@@ -104,12 +190,13 @@ impl SnapshotStore {
         // .gitignore can hold gigabytes of them. The project's own .gitignore
         // files still apply on top of this list.
         let excludes = dir.join("excludes");
-        tokio::fs::write(
-            &excludes,
-            "target/\nnode_modules/\n.venv/\nvenv/\ndist/\nbuild/\n.next/\n__pycache__/\n.pytest_cache/\n",
-        )
-        .await
-        .map_err(|e| e.to_string())?;
+        let contents: String = SNAPSHOT_EXCLUDE_DIRS
+            .iter()
+            .map(|d| format!("{d}/\n"))
+            .collect();
+        tokio::fs::write(&excludes, contents)
+            .await
+            .map_err(|e| e.to_string())?;
         Ok(Self {
             dir,
             index,
@@ -143,6 +230,52 @@ impl SnapshotStore {
         Ok(out)
     }
 
+    /// `run_ok`, but bounded by [`SNAPSHOT_CMD_TIMEOUT`] and `cancel`.
+    ///
+    /// `kill_on_drop` matters: tokio does not kill a spawned child when the
+    /// `output()` future is dropped, so without it a timed-out or cancelled
+    /// `git add` would keep hashing in the background. The kill leaves
+    /// `index.lock` behind — remove it here (the session's per-project lock
+    /// serializes our writers, so the lock can only be ours) or every later
+    /// snapshot fails with "index.lock exists".
+    async fn run_bounded(
+        &self,
+        project: &Path,
+        args: &[&str],
+        cancel: &tokio_util::sync::CancellationToken,
+    ) -> Result<std::process::Output, String> {
+        let mut cmd = tokio::process::Command::new("git");
+        cmd.args([
+            "-c",
+            &format!("core.excludesFile={}", self.excludes.display()),
+        ]);
+        cmd.args(args);
+        self.env(project, &mut cmd);
+        cmd.kill_on_drop(true);
+        let out = tokio::select! {
+            out = cmd.output() => out.map_err(|e| e.to_string()),
+            _ = tokio::time::sleep(SNAPSHOT_CMD_TIMEOUT) => {
+                Err(format!("git {} timed out", args.first().copied().unwrap_or("")))
+            }
+            _ = cancel.cancelled() => Err("cancelled".to_string()),
+        };
+        let out = match out {
+            Ok(out) => out,
+            Err(e) => {
+                let _ = std::fs::remove_file(self.index_lock());
+                return Err(e);
+            }
+        };
+        if !out.status.success() {
+            return Err(format!(
+                "git {}: {}",
+                args.first().copied().unwrap_or(""),
+                String::from_utf8_lossy(&out.stderr).trim()
+            ));
+        }
+        Ok(out)
+    }
+
     /// Lock file git writes next to the custom index while adding.
     fn index_lock(&self) -> std::path::PathBuf {
         let mut path = self.index.clone().into_os_string();
@@ -164,7 +297,15 @@ impl SnapshotStore {
     }
 
     /// Snapshot the project tree and return the commit SHA.
-    pub async fn snapshot(&self, project: &Path) -> Result<String, String> {
+    ///
+    /// Callers must gate this with [`snapshot_blocker`] first: the `add -A`
+    /// here is bounded and cancellable, but skipping an oversized or
+    /// self-containing tree outright is cheaper than discovering it mid-add.
+    pub async fn snapshot(
+        &self,
+        project: &Path,
+        cancel: &tokio_util::sync::CancellationToken,
+    ) -> Result<String, String> {
         // A run killed mid-add leaves index.lock behind and would wedge every
         // later snapshot. Older than ten minutes means the writer is gone.
         if let Ok(meta) = tokio::fs::metadata(&self.index_lock()).await
@@ -176,7 +317,10 @@ impl SnapshotStore {
         {
             let _ = tokio::fs::remove_file(self.index_lock()).await;
         }
-        self.run_ok(project, &["add", "-A"]).await?;
+        self.run_bounded(project, &["add", "-A"], cancel).await?;
+        if cancel.is_cancelled() {
+            return Err("cancelled".into());
+        }
         let out = self.run_ok(project, &["write-tree"]).await?;
         let tree = String::from_utf8_lossy(&out.stdout).trim().to_string();
         if tree.is_empty() {
@@ -266,18 +410,7 @@ impl SnapshotStore {
                     return false;
                 }
                 if let Some(name) = e.file_name().to_str()
-                    && matches!(
-                        name,
-                        "target"
-                            | "node_modules"
-                            | ".venv"
-                            | "venv"
-                            | "dist"
-                            | "build"
-                            | ".next"
-                            | "__pycache__"
-                            | ".pytest_cache"
-                    )
+                    && SNAPSHOT_EXCLUDE_DIRS.contains(&name)
                 {
                     return false;
                 }
@@ -348,7 +481,10 @@ mod restore_tests {
         let store = SnapshotStore::open(&dir.path().join("data"), "prj_test")
             .await
             .unwrap();
-        let sha = store.snapshot(&project).await.unwrap();
+        let sha = store
+            .snapshot(&project, &tokio_util::sync::CancellationToken::new())
+            .await
+            .unwrap();
         std::fs::write(project.join("b.txt"), "b").unwrap();
         store.restore(&project, &sha).await.unwrap();
         assert!(project.join("a.txt").exists());
@@ -372,7 +508,10 @@ mod restore_tests {
         let store = SnapshotStore::open(&dir.path().join("data"), "prj_test")
             .await
             .unwrap();
-        let sha = store.snapshot(&project).await.unwrap();
+        let sha = store
+            .snapshot(&project, &tokio_util::sync::CancellationToken::new())
+            .await
+            .unwrap();
         std::fs::write(project.join("café.txt"), "edited").unwrap();
         std::fs::write(project.join("ünïcode.txt"), "new").unwrap();
         store.restore(&project, &sha).await.unwrap();
@@ -395,7 +534,10 @@ mod restore_tests {
         let store = SnapshotStore::open(&dir.path().join("data"), "prj_test")
             .await
             .unwrap();
-        let sha = store.snapshot(&project).await.unwrap();
+        let sha = store
+            .snapshot(&project, &tokio_util::sync::CancellationToken::new())
+            .await
+            .unwrap();
         let out = std::process::Command::new("git")
             .args(["--git-dir", store.dir.join("repo.git").to_str().unwrap()])
             .args(["ls-tree", "-r", "--name-only", &sha])
@@ -423,9 +565,15 @@ mod restore_tests {
             .await
             .unwrap();
         std::fs::write(project.join("a.txt"), "1").unwrap();
-        let first = store.snapshot(&project).await.unwrap();
+        let first = store
+            .snapshot(&project, &tokio_util::sync::CancellationToken::new())
+            .await
+            .unwrap();
         std::fs::write(project.join("a.txt"), "2").unwrap();
-        let second = store.snapshot(&project).await.unwrap();
+        let second = store
+            .snapshot(&project, &tokio_util::sync::CancellationToken::new())
+            .await
+            .unwrap();
         assert_ne!(first, second);
         let parent = std::process::Command::new("git")
             .args(["--git-dir", store.dir.join("repo.git").to_str().unwrap()])
@@ -438,5 +586,39 @@ mod restore_tests {
             first,
             "parent must be the previous snapshot"
         );
+    }
+
+    #[test]
+    fn blocker_rejects_a_tree_that_contains_the_store() {
+        // Mirrors running from $HOME: data_dir lives under the project root,
+        // so `git add -A` would ingest the snapshot objects themselves.
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path().join("data");
+        assert!(
+            snapshot_blocker(&data, dir.path()).is_some(),
+            "a project containing the store must be skipped"
+        );
+        let proj = dir.path().join("elsewhere").join("proj");
+        std::fs::create_dir_all(&proj).unwrap();
+        std::fs::write(proj.join("a.txt"), "a").unwrap();
+        assert!(
+            snapshot_blocker(&data, &proj).is_none(),
+            "a normal project must not be blocked"
+        );
+    }
+
+    #[tokio::test]
+    async fn snapshot_aborts_when_cancelled() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("proj");
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(project.join("a.txt"), "a").unwrap();
+        let store = SnapshotStore::open(&dir.path().join("data"), "prj_test")
+            .await
+            .unwrap();
+        let token = tokio_util::sync::CancellationToken::new();
+        token.cancel();
+        let err = store.snapshot(&project, &token).await.unwrap_err();
+        assert_eq!(err, "cancelled");
     }
 }

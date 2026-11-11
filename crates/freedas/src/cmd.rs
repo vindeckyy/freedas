@@ -130,9 +130,9 @@ pub async fn run(cli: Cli, project_root: PathBuf) -> Result<i32, Box<dyn std::er
                     manual,
                     session_id,
                 };
-                // The TUI owns a blocking runtime; run it outside the async
-                // context so dropping that runtime does not panic.
-                tokio::task::block_in_place(|| freedas_tui::run_with_opts(opts))?;
+                // The TUI owns a blocking loop; main runs a current_thread
+                // runtime so this is a plain call, not a `block_in_place`.
+                freedas_tui::run_with_opts(opts)?;
             } else {
                 eprintln!("{}", freedas_tui::not_interactive_message());
                 return Ok(2);
@@ -1420,7 +1420,7 @@ pub async fn run(cli: Cli, project_root: PathBuf) -> Result<i32, Box<dyn std::er
             // Start the TUI in that checkout.
             if std::io::IsTerminal::is_terminal(&std::io::stdin()) {
                 std::env::set_current_dir(&project_root).ok();
-                tokio::task::block_in_place(freedas_tui::run)?;
+                freedas_tui::run()?;
             }
             Ok(0)
         }

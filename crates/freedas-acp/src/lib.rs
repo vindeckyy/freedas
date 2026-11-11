@@ -537,6 +537,7 @@ impl AcpServer {
             approver: None,
             db: Some(self.db.clone()),
             project_id: self.db.ensure_project(&session.cwd).ok(),
+            prefetch: None,
         }
     }
 

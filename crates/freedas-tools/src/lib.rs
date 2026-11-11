@@ -63,6 +63,9 @@ pub struct ToolContext {
     pub db: Option<std::sync::Arc<freedas_db::Db>>,
     /// Project scope for memory writes and recall.
     pub project_id: Option<String>,
+    /// Speculative read cache filled while the model streams; `read` serves a
+    /// hit only when the file's mtime and length still match.
+    pub prefetch: Option<std::sync::Arc<ReadPrefetch>>,
 }
 
 #[derive(Debug, Clone)]
@@ -617,6 +620,58 @@ pub fn check_perm_readonly(ctx: &ToolContext, action: &str, resource: Option<&st
     finish(ctx, effect, (action.to_string(), res), None, false)
 }
 
+/// Cap speculative reads: at most this many files and this many bytes each.
+pub const PREFETCH_MAX_FILES: usize = 8;
+const PREFETCH_MAX_BYTES: u64 = 1024 * 1024;
+
+/// (mtime, len, bytes) captured at prefetch time.
+type Prefetched = (Option<std::time::SystemTime>, u64, std::sync::Arc<Vec<u8>>);
+
+/// Speculative read cache: files fetched in the background while the model
+/// streams. A `read` call serves cached bytes only when the on-disk file is
+/// unchanged — verified by mtime and length at call time — so a prefetch can
+/// never hand the model stale content.
+
+#[derive(Default, Debug)]
+pub struct ReadPrefetch {
+    inner: std::sync::Mutex<std::collections::HashMap<PathBuf, Prefetched>>,
+}
+
+impl ReadPrefetch {
+    /// Read `candidates` (canonical absolute paths) in the background. Tasks
+    /// die with the run's runtime, so a cancelled run leaves nothing behind.
+    pub fn spawn(candidates: Vec<PathBuf>) -> std::sync::Arc<Self> {
+        let cache = std::sync::Arc::new(Self::default());
+        for path in candidates.into_iter().take(PREFETCH_MAX_FILES) {
+            let cache = cache.clone();
+            tokio::spawn(async move {
+                let Ok(meta) = tokio::fs::metadata(&path).await else {
+                    return;
+                };
+                if !meta.is_file() || meta.len() > PREFETCH_MAX_BYTES {
+                    return;
+                }
+                let Ok(bytes) = tokio::fs::read(&path).await else {
+                    return;
+                };
+                cache.inner.lock().expect("prefetch cache").insert(
+                    path,
+                    (meta.modified().ok(), meta.len(), std::sync::Arc::new(bytes)),
+                );
+            });
+        }
+        cache
+    }
+
+    /// Fresh bytes for `abs` when a prefetch captured them and `meta` — just
+    /// stat'ed by the caller — shows the file unchanged since.
+    pub fn lookup(&self, abs: &Path, meta: &std::fs::Metadata) -> Option<std::sync::Arc<Vec<u8>>> {
+        let map = self.inner.lock().expect("prefetch cache");
+        let (mtime, len, bytes) = map.get(abs)?;
+        (*mtime == meta.modified().ok() && *len == meta.len()).then(|| bytes.clone())
+    }
+}
+
 pub struct Read;
 #[async_trait]
 impl Tool for Read {
@@ -647,12 +702,20 @@ impl Tool for Read {
         if !meta.is_file() {
             return Err(FreedasError::Tool(format!("not a regular file: {path}")));
         }
-        let mut bytes = Vec::new();
-        let mut file = tokio::fs::File::open(&abs).await?;
-        // Take one byte past the cap so truncation is detectable while the
-        // read stays bounded.
-        let mut bounded = (&mut file).take(CAP + 1);
-        bounded.read_to_end(&mut bytes).await?;
+        // Speculative hit: bytes prefetched while the model streamed, served
+        // only when `meta` proves the file is unchanged since the prefetch.
+        let mut bytes = match ctx.prefetch.as_ref().and_then(|p| p.lookup(&abs, &meta)) {
+            Some(bytes) => (*bytes).clone(),
+            None => {
+                let mut bytes = Vec::new();
+                let mut file = tokio::fs::File::open(&abs).await?;
+                // Take one byte past the cap so truncation is detectable while
+                // the read stays bounded.
+                let mut bounded = (&mut file).take(CAP + 1);
+                bounded.read_to_end(&mut bytes).await?;
+                bytes
+            }
+        };
         let truncated_read = bytes.len() as u64 > CAP;
         if truncated_read {
             bytes.truncate(CAP as usize);
@@ -2600,6 +2663,7 @@ mod tests {
             approver: None,
             db: None,
             project_id: None,
+            prefetch: None,
         }
     }
 
@@ -2793,6 +2857,7 @@ mod tests {
             approver: None,
             db: None,
             project_id: None,
+            prefetch: None,
         };
         let out = Edit
             .execute(&json!({"path": "a.txt", "old": "hello", "new": "hi"}), &ctx)
@@ -2821,6 +2886,7 @@ mod tests {
             approver: None,
             db: None,
             project_id: None,
+            prefetch: None,
         };
         (ctx, dir)
     }
@@ -2935,6 +3001,7 @@ mod tests {
             approver: None,
             db: None,
             project_id: None,
+            prefetch: None,
         };
         let err = BrowserTool::new()
             .execute(&json!({"operation": "scroll"}), &ctx)
@@ -2968,6 +3035,7 @@ mod parity_tests {
             approver: None,
             db: None,
             project_id: None,
+            prefetch: None,
         }
     }
 
@@ -2991,6 +3059,38 @@ mod parity_tests {
             .await
             .unwrap();
         assert!(out.content.contains("prefer tabs"), "{}", out.content);
+    }
+
+    #[tokio::test]
+    async fn prefetch_serves_only_unchanged_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("a.txt");
+        std::fs::write(&f, "hello").unwrap();
+        let canon = f.canonicalize().unwrap();
+        let cache = ReadPrefetch::spawn(vec![canon.clone()]);
+        // The prefetch task is in flight; poll briefly for it to land.
+        let mut hit = None;
+        for _ in 0..50 {
+            let meta = std::fs::metadata(&canon).unwrap();
+            if let Some(bytes) = cache.lookup(&canon, &meta) {
+                hit = Some(bytes);
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert_eq!(
+            hit.as_deref().map(|b| b.as_slice()),
+            Some(b"hello".as_slice())
+        );
+        // A change since the prefetch (new length) must miss, never serve stale.
+        std::fs::write(&canon, "changed!").unwrap();
+        let meta = std::fs::metadata(&canon).unwrap();
+        assert!(cache.lookup(&canon, &meta).is_none());
+        // And an end-to-end read through the tool agrees.
+        let mut c = ctx(dir.path());
+        c.prefetch = Some(cache);
+        let out = Read.execute(&json!({"path": "a.txt"}), &c).await.unwrap();
+        assert_eq!(out.content, "changed!");
     }
 
     #[tokio::test]

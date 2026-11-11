@@ -2038,6 +2038,7 @@ async fn shell_session(
         })),
         db: Some(s.db.clone()),
         project_id: Some(session.project_id),
+        prefetch: None,
     };
     let input = json!({"command": command, "timeout_ms": 30_000});
     match freedas_tools::Bash.execute(&input, &ctx).await {

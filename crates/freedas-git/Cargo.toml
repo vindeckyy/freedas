@@ -8,6 +8,7 @@ repository.workspace = true
 [dependencies]
 freedas-core = { path = "../freedas-core" }
 tokio.workspace = true
+tokio-util.workspace = true
 ignore = "0.4"
 
 [dev-dependencies]

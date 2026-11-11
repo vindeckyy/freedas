@@ -14,6 +14,24 @@ yours to run.
   Anthropic, Gemini, or OpenRouter, or route everything through your own
   `freedas-gateway`.
 
+## Benchmarks
+
+The fastest measured harness in every publicly benchmarkable category —
+spawn, time-to-interactive, idle memory, disk footprint, per-prompt
+overhead, and input tokens per request:
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/benchmarks-dark.svg">
+  <source media="(prefers-color-scheme: light)" srcset="docs/benchmarks-light.svg">
+  <img alt="Freedas benchmark report: freedas ranks first in spawn time, launch-to-interactive, idle memory, disk footprint, per-prompt overhead, and input tokens" src="docs/benchmarks-light.svg">
+</picture>
+
+External numbers are the same-rig medians published at
+[agentty.org](https://agentty.org/benchmarks/) and [ovm.sh](https://ovm.sh/benchmark),
+plus the crewshal TTFT harness-overhead study and the orbi.build
+token-efficiency comparison; Freedas numbers were measured on the release
+build on one machine, so treat margins as directional.
+
 ## Install
 
 ```sh

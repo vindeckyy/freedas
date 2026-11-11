@@ -316,25 +316,33 @@ impl Runner {
         names
     }
 
-    async fn snapshot_before_run(
+    /// Capture the pre-write snapshot for `message_id`. The caller must hold
+    /// the project lock: it is taken lazily, immediately before the first
+    /// mutating tool call, and holding the lock across both keeps a concurrent
+    /// write from landing between the capture and the mutation it records.
+    async fn snapshot_for_message(
         &self,
         project_root: &std::path::Path,
         session_id: &str,
         message_id: &str,
+        cancel: &tokio_util::sync::CancellationToken,
     ) -> Result<Option<String>> {
         if !self.config.snapshots {
             return Ok(None);
         }
-        // Serialized per project: a concurrent tool write must not land
-        // mid-`git add -A`, or the snapshot tree is torn.
-        let lock_arc = project_lock_for(project_root);
-        let _guard = lock_arc.lock().await;
+        // `git add -A` on a tree that contains the snapshot store, or is too
+        // large to hash quickly, churns for minutes while the run looks hung.
+        // Skip the snapshot instead: the run proceeds and undo is unavailable.
+        if let Some(why) = freedas_git::snapshot_blocker(&self.paths.data_dir, project_root) {
+            eprintln!("snapshot skipped for {}: {why}", project_root.display());
+            return Ok(None);
+        }
         let project_id = self.db.ensure_project(project_root)?;
         let store = freedas_git::SnapshotStore::open(&self.paths.data_dir, &project_id)
             .await
             .map_err(|e| FreedasError::Other(format!("snapshot: {e}")))?;
         let sha = store
-            .snapshot(project_root)
+            .snapshot(project_root, cancel)
             .await
             .map_err(|e| FreedasError::Other(format!("snapshot: {e}")))?;
         self.db.record_snapshot(session_id, message_id, &sha)?;
@@ -418,7 +426,7 @@ impl Runner {
         // Capture the current state first: an empty result means redo could not
         // put the change back, so refuse rather than lose it.
         let cur = store
-            .snapshot(project_root)
+            .snapshot(project_root, &tokio_util::sync::CancellationToken::new())
             .await
             .map_err(|e| FreedasError::Other(format!("snapshot: {e}")))?;
         // Atomic: capture, delete, and record the redo entry in one transaction.
@@ -744,8 +752,10 @@ impl Runner {
             "text",
             &serde_json::json!({"text": prompt}),
         );
-        self.snapshot_before_run(&project_root, &session_id, &user_msg)
-            .await?;
+        // Files the prompt names are the model's most likely first reads;
+        // fetch them while the request streams so a `read` lands as a hit.
+        let read_prefetch =
+            freedas_tools::ReadPrefetch::spawn(prefetch_candidates(prompt, &project_root));
 
         let agents = freedas_agent::merged_agents(&project_root);
         let agent_def = freedas_agent::find(&agents, agent).cloned();
@@ -754,7 +764,16 @@ impl Runner {
         let compaction = self.db.latest_compaction(&session_id).ok().flatten();
         let mut system = vec![freedas_agent::CORE_PROMPT.to_string()];
         if let Some(def) = &agent_def {
-            system.push(def.system.clone());
+            // Builtin agents embed CORE_PROMPT so their system stands alone;
+            // sending it again here just pays for the same tokens twice.
+            let extra = def
+                .system
+                .strip_prefix(freedas_agent::CORE_PROMPT)
+                .map(str::trim_start)
+                .unwrap_or(def.system.as_str());
+            if !extra.is_empty() {
+                system.push(extra.to_string());
+            }
         }
         if let Some((_, summary)) = &compaction {
             system.push(format!("[compaction summary]\n{summary}"));
@@ -915,6 +934,10 @@ impl Runner {
         // Read hashes live for the whole run: a read in one step must satisfy
         // the stale-read check for a write in a later step.
         let read_hashes: Arc<Mutex<HashMap<PathBuf, String>>> = Arc::default();
+        // The pre-write snapshot is lazy: it is captured under the project
+        // lock right before the first mutating tool call, so a read-only run
+        // pays no `git add -A` at all. One capture per message.
+        let mut snapshot_done = false;
 
         'run: for step in 0..self.config.max_steps {
             if cancel.is_cancelled() {
@@ -1362,6 +1385,7 @@ impl Runner {
                 approver: approver.clone(),
                 db: Some(self.db.clone()),
                 project_id: Some(project_id.clone()),
+                prefetch: Some(read_prefetch.clone()),
             };
             // Record the assistant turn that requested the tools so
             // OpenAI-compatible APIs can pair each result.
@@ -1589,7 +1613,21 @@ impl Runner {
                             name.as_str(),
                             "write" | "edit" | "patch" | "apply_patch" | "bash"
                         ) {
-                            Some(fs_lock_arc.lock().await)
+                            let guard = fs_lock_arc.lock().await;
+                            // First mutation of this message: capture the tree
+                            // it mutates. The guard is already held, so the
+                            // capture and the write are one critical section.
+                            if !snapshot_done {
+                                snapshot_done = true;
+                                self.snapshot_for_message(
+                                    &project_root,
+                                    &session_id,
+                                    &user_msg,
+                                    &cancel,
+                                )
+                                .await?;
+                            }
+                            Some(guard)
                         } else {
                             None
                         };
@@ -2484,6 +2522,7 @@ async fn fetch_instructions(
         approver: None,
         db: None,
         project_id: None,
+        prefetch: None,
     };
     let input = serde_json::json!({"url": url});
     match tokio::time::timeout(
@@ -2712,6 +2751,35 @@ fn explicit_preference(prompt: &str) -> Option<String> {
     }
     let text = prompt.trim();
     (text.chars().count() >= 12).then(|| text.chars().take(500).collect())
+}
+
+/// Existing files the prompt names (as `@path`, `path`, or `'path'`): the
+/// model almost always reads them first, so they are prefetched while it
+/// streams. Canonicalized so they key-match `resolve_path` inside `read`.
+fn prefetch_candidates(prompt: &str, root: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut out = Vec::new();
+    for token in prompt
+        .split(|c: char| !(c.is_alphanumeric() || matches!(c, '/' | '.' | '_' | '-' | '@' | '~')))
+    {
+        let t = token.trim_start_matches('@');
+        if t.len() < 2 || t.len() > 256 {
+            continue;
+        }
+        let p = std::path::Path::new(t);
+        let abs = if p.is_absolute() {
+            p.to_path_buf()
+        } else {
+            root.join(p)
+        };
+        if abs.is_file()
+            && let Ok(canon) = abs.canonicalize()
+            && !out.contains(&canon)
+        {
+            out.push(canon);
+        }
+    }
+    out.truncate(freedas_tools::PREFETCH_MAX_FILES);
+    out
 }
 
 fn note_file_read(files_read: &mut Vec<String>, path: &str, root: &std::path::Path) {
@@ -3252,5 +3320,51 @@ mod tests {
             "original"
         );
         unsafe { std::env::remove_var("FREEDAS_DATA") };
+    }
+
+    #[tokio::test]
+    async fn read_only_run_takes_no_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().to_path_buf();
+        let data_dir = tempfile::tempdir().unwrap();
+        unsafe { std::env::set_var("FREEDAS_DATA", data_dir.path().join("freedas-data")) };
+        let db = Arc::new(Db::memory().unwrap());
+        let paths = Paths::resolve(root.clone());
+        let runner = Runner::new(
+            db.clone(),
+            paths,
+            Config::default(),
+            freedas_catalog::builtin_catalog(),
+        );
+        let r = runner
+            .run_task(
+                root.clone(),
+                "build",
+                Some("fake/fake-1".into()),
+                "hello",
+                true,
+                false,
+                None,
+                None,
+            )
+            .await
+            .unwrap();
+        assert!(
+            db.list_snapshot_rows(&r.session_id)
+                .map(|rows| rows.is_empty())
+                .unwrap_or(true),
+            "a run with no mutating tool must not pay for a snapshot"
+        );
+        unsafe { std::env::remove_var("FREEDAS_DATA") };
+    }
+
+    #[test]
+    fn prefetch_candidates_finds_prompt_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::write(root.join("a.txt"), "x").unwrap();
+        let hits = prefetch_candidates("explain @a.txt and missing.rs please", root);
+        assert_eq!(hits, vec![root.join("a.txt").canonicalize().unwrap()]);
+        assert!(prefetch_candidates("no files here", root).is_empty());
     }
 }
