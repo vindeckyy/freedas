@@ -99,6 +99,10 @@ check "stats runs"          "$BIN stats >/dev/null 2>&1"
 check "providers list"      "$BIN providers list >/dev/null 2>&1"
 check "router stats"        "$BIN router stats >/dev/null 2>&1"
 check "plugin list"         "$BIN plugin list >/dev/null 2>&1"
+check "session bad id"      "! $BIN run --session ses_nope 'ECHO:x' --format json >/dev/null 2>&1"
+cd /tmp && mkdir -p freedas-e2e-other && cd freedas-e2e-other
+check "session cross-proj"  "! $BIN run --session '$SID' 'ECHO:x' --format json >/dev/null 2>&1"
+cd "$D"
 
 echo "== 8. mcp (config only) =="
 check "mcp list" "$BIN mcp list >/dev/null 2>&1"
