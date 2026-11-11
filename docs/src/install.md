@@ -6,13 +6,13 @@ Windows users run inside WSL, which uses the Linux artifacts.
 ## Install script
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/freedas/freedas/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/vindeckyy/freedas/main/install.sh | bash
 ```
 
 The script:
 
 1. Detects your OS and architecture (`darwin`/`linux`, `arm64`/`x86_64`); anything else fails with `unsupported OS` or `unsupported architecture`. Only glibc Linux assets ship — musl hosts (Alpine) get a clear error telling you to build from source.
-2. Downloads `freedas-<os>-<arch>.tar.gz` from the release page at `https://github.com/freedas/freedas/releases` (override with `FREEDAS_RELEASE_BASE`, which must be `https://` or `file://`; curl is pinned to those protocols and `https`-only redirects).
+2. Downloads `freedas-<os>-<arch>.tar.gz` from the release page at `https://github.com/vindeckyy/freedas/releases` (override with `FREEDAS_RELEASE_BASE`, which must be `https://` or `file://`; curl is pinned to those protocols and `https`-only redirects).
 3. Refuses to install without a published checksum: the asset's `.sha256` or `SHA256SUMS` must exist and match. When `cosign` is installed and the release ships a `.sig`, the signature is verified too (warns otherwise; `FREEDAS_INSTALL_SKIP_SIG=1` silences the check entirely).
 4. Extracts with `--no-absolute-filenames` and requires exactly one `freedas` binary, then installs to `~/.freedas/bin/freedas` (override with `PREFIX` as the first argument — restricted to safe path characters since it is written into your shell rc file; `FREEDAS_VERSION` picks a release tag, default `latest`).
 5. Adds `~/.freedas/bin` to your shell profile (`.zshrc`, `.bash_profile`, `.bashrc`, or fish `config.fish`) if it is not already there.
@@ -23,7 +23,7 @@ No sudo. Open a new terminal afterward, or `source` your profile.
 ## From source
 
 ```bash
-git clone https://github.com/freedas/freedas.git
+git clone https://github.com/vindeckyy/freedas.git
 cd freedas
 cargo build --locked --release
 cp target/release/freedas ~/.freedas/bin/freedas

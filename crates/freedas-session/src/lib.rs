@@ -1195,7 +1195,9 @@ impl Runner {
             } else {
                 serde_json::json!({"provider": "freedas", "id": "auto", "variant": variant})
             };
-            let _ = self.db.set_message_model(&session_id, &assistant_msg, &recorded);
+            let _ = self
+                .db
+                .set_message_model(&session_id, &assistant_msg, &recorded);
             let (session_provider, session_model) = if pinned.is_some() {
                 (provider_id.as_str(), _model_id.as_str())
             } else {
@@ -1398,7 +1400,9 @@ impl Runner {
                         // Counted edits are now gated; a later idle turn
                         // must not re-run the same check.
                         edited_files = 0;
-                        if gate.passed && let Some(p) = &progress {
+                        if gate.passed
+                            && let Some(p) = &progress
+                        {
                             p("\u{1}standards gate passed".into());
                         }
                         if !gate.passed {
@@ -1643,14 +1647,11 @@ impl Runner {
                         }
                     }
                 }
-                let mcp_hit = mcp_tools
-                    .iter()
-                    .find(|b| b.name == *name)
-                    .and_then(|b| {
-                        mcp_servers
-                            .get(b.server)
-                            .map(|(sn, s)| (s, sn.as_str(), b.tool.clone()))
-                    });
+                let mcp_hit = mcp_tools.iter().find(|b| b.name == *name).and_then(|b| {
+                    mcp_servers
+                        .get(b.server)
+                        .map(|(sn, s)| (s, sn.as_str(), b.tool.clone()))
+                });
                 if let Some((server, mcp_server_name, tool_name)) = mcp_hit {
                     // MCP calls follow the same allow/ask/deny rules, with the
                     // full `<server>:<tool>` name as the action.
@@ -2935,10 +2936,7 @@ fn explicit_preference(prompt: &str) -> Option<String> {
     let explicit = ["remember", "from now on", "always", "never", "prefer"];
     // Store only the preference value: the span from the earliest trigger
     // onward, never the narration or surrounding context that preceded it.
-    let start = explicit
-        .iter()
-        .filter_map(|t| lower.find(t))
-        .min()?;
+    let start = explicit.iter().filter_map(|t| lower.find(t)).min()?;
     let tail = lower[start..].to_string();
     if INJECTION_PATTERNS.iter().any(|p| tail.contains(p)) {
         return None;

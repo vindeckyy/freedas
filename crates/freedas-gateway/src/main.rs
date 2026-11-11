@@ -53,13 +53,11 @@ async fn main() -> anyhow::Result<()> {
         .upstream
         .or_else(|| std::env::var("FREEDAS_GATEWAY_UPSTREAM").ok())
         .or_else(|| {
-            std::env::var("FREEDAS_UPSTREAM_URL")
-                .ok()
-                .inspect(|_| {
-                    eprintln!(
-                        "warning: FREEDAS_UPSTREAM_URL is deprecated; use FREEDAS_GATEWAY_UPSTREAM"
-                    );
-                })
+            std::env::var("FREEDAS_UPSTREAM_URL").ok().inspect(|_| {
+                eprintln!(
+                    "warning: FREEDAS_UPSTREAM_URL is deprecated; use FREEDAS_GATEWAY_UPSTREAM"
+                );
+            })
         })
         .unwrap_or_else(|| "https://api.openai.com/v1".into());
     let mut state = freedas_gateway::AppState::new(upstream.clone(), pool.clone());

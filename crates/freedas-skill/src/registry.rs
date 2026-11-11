@@ -227,12 +227,20 @@ pub async fn pull_skill(
             .ok_or_else(|| "pull failed: missing integrity header".to_string())?
             .to_string(),
     };
-    if resp.content_length().map(|n| n > MAX_PULL_BYTES).unwrap_or(false) {
-        return Err(format!("pull failed: package exceeds {MAX_PULL_BYTES} bytes"));
+    if resp
+        .content_length()
+        .map(|n| n > MAX_PULL_BYTES)
+        .unwrap_or(false)
+    {
+        return Err(format!(
+            "pull failed: package exceeds {MAX_PULL_BYTES} bytes"
+        ));
     }
     let bytes = resp.bytes().await.map_err(|e| e.to_string())?;
     if bytes.len() as u64 > MAX_PULL_BYTES {
-        return Err(format!("pull failed: package exceeds {MAX_PULL_BYTES} bytes"));
+        return Err(format!(
+            "pull failed: package exceeds {MAX_PULL_BYTES} bytes"
+        ));
     }
     if expected != sha256_hex(&bytes) {
         return Err("pull failed: integrity check failed".into());

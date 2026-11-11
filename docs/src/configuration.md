@@ -101,7 +101,6 @@ skips the project layer. Path variables relocate directories; see
 
 ```jsonc
 {
-  "$schema": "https://freedas.dev/config.json",
   // Router picks the model per step; pin a cheap model for titles.
   "model": "freedas/auto",
   "small_model": "freedas/auto-cheap",

@@ -336,12 +336,10 @@ impl AcpServer {
         };
         // Only advertised agents may be selected; an arbitrary string here
         // would widen tool access for later prompts.
-        let trust = freedas_core::config::load(
-            &freedas_core::paths::Paths::resolve(cwd.clone()),
-            false,
-        )
-        .map(|c| c.trust_project_code)
-        .unwrap_or(false);
+        let trust =
+            freedas_core::config::load(&freedas_core::paths::Paths::resolve(cwd.clone()), false)
+                .map(|c| c.trust_project_code)
+                .unwrap_or(false);
         let known = freedas_agent::merged_agents(&cwd, trust)
             .iter()
             .any(|a| a.id == agent);

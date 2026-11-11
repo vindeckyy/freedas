@@ -151,7 +151,10 @@ fn is_interpreter(name: &str) -> bool {
         || b.starts_with("lua")
         || b.starts_with("julia")
         || b.starts_with("busybox")
-        || matches!(b, "sh" | "bash" | "dash" | "zsh" | "ksh" | "fish" | "pwsh" | "powershell")
+        || matches!(
+            b,
+            "sh" | "bash" | "dash" | "zsh" | "ksh" | "fish" | "pwsh" | "powershell"
+        )
 }
 
 /// Token-level dynamic markers for one simple command: catches the real-world
@@ -166,10 +169,12 @@ fn dynamic_token_markers(toks: &[String]) -> Vec<String> {
             "eval" | "xargs" | "source" => hits.push(b.to_string()),
             "env" => hits.push("env".to_string()),
             "find" => {
-                if toks[i + 1..]
-                    .iter()
-                    .any(|a| matches!(a.as_str(), "-exec" | "-execdir" | "-delete" | "-ok" | "-okdir"))
-                {
+                if toks[i + 1..].iter().any(|a| {
+                    matches!(
+                        a.as_str(),
+                        "-exec" | "-execdir" | "-delete" | "-ok" | "-okdir"
+                    )
+                }) {
                     hits.push("find -exec/-delete".to_string());
                 }
             }
@@ -179,9 +184,10 @@ fn dynamic_token_markers(toks: &[String]) -> Vec<String> {
             "rg" if toks[i + 1..].iter().any(|a| a.starts_with("--pre")) => {
                 hits.push("rg --pre".to_string())
             }
-            "sed" if toks[i + 1..]
-                .iter()
-                .any(|a| a == "-e" || a.starts_with("--expression") || a == "-i") =>
+            "sed"
+                if toks[i + 1..]
+                    .iter()
+                    .any(|a| a == "-e" || a.starts_with("--expression") || a == "-i") =>
             {
                 hits.push("sed -e/-i".to_string())
             }
@@ -192,9 +198,9 @@ fn dynamic_token_markers(toks: &[String]) -> Vec<String> {
             _ => {}
         }
         if is_interpreter(t)
-            && toks
-                .get(i + 1)
-                .is_some_and(|f| matches!(f.as_str(), "-c" | "-e" | "-r" | "-p" | "-i" | "-E" | "-x"))
+            && toks.get(i + 1).is_some_and(|f| {
+                matches!(f.as_str(), "-c" | "-e" | "-r" | "-p" | "-i" | "-E" | "-x")
+            })
         {
             hits.push(format!("{b} inline payload"));
         }
@@ -853,9 +859,20 @@ fn strip_wrappers(mut t: Vec<String>) -> (Vec<String>, Option<String>) {
                     // -E, --replace=/-n/-P/--max-*).
                     let takes_value = matches!(
                         opt.as_str(),
-                        "-I" | "-n" | "-P" | "-s" | "-L" | "-d" | "-E" | "-e" | "-i"
-                            | "--replace" | "--max-args" | "--max-procs" | "--max-lines"
-                            | "--eof" | "--delimiter"
+                        "-I" | "-n"
+                            | "-P"
+                            | "-s"
+                            | "-L"
+                            | "-d"
+                            | "-E"
+                            | "-e"
+                            | "-i"
+                            | "--replace"
+                            | "--max-args"
+                            | "--max-procs"
+                            | "--max-lines"
+                            | "--eof"
+                            | "--delimiter"
                     );
                     if takes_value && !t.is_empty() {
                         t.remove(0);
@@ -875,8 +892,15 @@ fn strip_wrappers(mut t: Vec<String>) -> (Vec<String>, Option<String>) {
                     // nsenter flags that take a value.
                     if matches!(
                         opt.as_str(),
-                        "-t" | "-r" | "-w" | "-G" | "-S" | "--target" | "--root"
-                            | "--wd" | "--setgid" | "--setuid"
+                        "-t" | "-r"
+                            | "-w"
+                            | "-G"
+                            | "-S"
+                            | "--target"
+                            | "--root"
+                            | "--wd"
+                            | "--setgid"
+                            | "--setuid"
                     ) && !t.is_empty()
                     {
                         t.remove(0);
@@ -972,9 +996,25 @@ fn find_roots(args: &[String]) -> Vec<&str> {
         // find flags that consume a following value.
         if matches!(
             a.as_str(),
-            "-name" | "-iname" | "-type" | "-user" | "-group" | "-perm" | "-size"
-                | "-mtime" | "-mmin" | "-atime" | "-amin" | "-ctime" | "-cmin"
-                | "-newer" | "-maxdepth" | "-mindepth" | "-regex" | "-path" | "-ipath"
+            "-name"
+                | "-iname"
+                | "-type"
+                | "-user"
+                | "-group"
+                | "-perm"
+                | "-size"
+                | "-mtime"
+                | "-mmin"
+                | "-atime"
+                | "-amin"
+                | "-ctime"
+                | "-cmin"
+                | "-newer"
+                | "-maxdepth"
+                | "-mindepth"
+                | "-regex"
+                | "-path"
+                | "-ipath"
         ) {
             it.next();
         }
@@ -1056,10 +1096,7 @@ fn check_tokens(t: &[String]) -> Option<String> {
                 // the root itself, so check the payload both ways.
                 let has_placeholder = payload.iter().any(|p| p.contains("{}"));
                 let expanded: Vec<String> = if rootish && has_placeholder {
-                    payload
-                        .iter()
-                        .map(|p| p.replace("{}", "/"))
-                        .collect()
+                    payload.iter().map(|p| p.replace("{}", "/")).collect()
                 } else {
                     payload.clone()
                 };

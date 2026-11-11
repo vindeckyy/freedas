@@ -10,12 +10,10 @@
 
 Please do not file a public issue for a vulnerability.
 
-- When the repository is public, report through **GitHub security
-  advisories** on the repository page.
-- Until that exists, open a private issue in the repository's issue
-  tracker or contact the maintainers through the channel listed in
-  `SUPPORT.md`. A dedicated reporting email will be published here once
-  the repository is public; it is a placeholder until then.
+Report through **GitHub private vulnerability reporting** on the
+[repository security page](https://github.com/vindeckyy/freedas/security/advisories/new).
+If that channel is unavailable, open an issue with the details withheld
+and ask for a private contact.
 
 Include: the `freedas` version, your OS and arch, the exact command or
 config that triggers the behavior, the expected versus actual result, and

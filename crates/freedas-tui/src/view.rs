@@ -518,11 +518,7 @@ pub(crate) fn draw_permission(
                 lines.push(Line::styled(
                     format!(
                         "… {hidden} hidden line(s){} …",
-                        if warn {
-                            " — includes deletions"
-                        } else {
-                            ""
-                        }
+                        if warn { " — includes deletions" } else { "" }
                     ),
                     style::warning(),
                 ));
@@ -585,9 +581,12 @@ pub(crate) fn draw_permission(
     if skip > 0 && !visible.is_empty() {
         f.render_widget(
             Paragraph::new(
-                std::iter::once(Line::styled(format!("… {skip} line(s) above"), style::dim()))
-                    .chain(visible.into_iter().skip(1))
-                    .collect::<Vec<_>>(),
+                std::iter::once(Line::styled(
+                    format!("… {skip} line(s) above"),
+                    style::dim(),
+                ))
+                .chain(visible.into_iter().skip(1))
+                .collect::<Vec<_>>(),
             ),
             content_area,
         );

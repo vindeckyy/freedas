@@ -1119,7 +1119,7 @@ async fn delete_token(
 }
 
 async fn github_install(State(state): State<AppState>) -> Json<Value> {
-    let repo = std::env::var("FREEDAS_GITHUB_REPO").unwrap_or_else(|_| "freedas/freedas".into());
+    let repo = std::env::var("FREEDAS_GITHUB_REPO").unwrap_or_else(|_| "vindeckyy/freedas".into());
     let install_url = format!(
         "{}/github/install/callback",
         state.base_url.trim_end_matches('/')

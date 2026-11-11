@@ -1680,7 +1680,9 @@ pub async fn run(cli: Cli, project_root: PathBuf) -> Result<i32, Box<dyn std::er
         }
         Some(Commands::Memory { command }) => {
             // Scoped to the current project unless --global widens it.
-            let mem_scope = |d: &freedas_db::Db, global: bool| -> Result<Option<String>, Box<dyn std::error::Error>> {
+            let mem_scope = |d: &freedas_db::Db,
+                             global: bool|
+             -> Result<Option<String>, Box<dyn std::error::Error>> {
                 if global {
                     Ok(None)
                 } else {
@@ -1759,8 +1761,7 @@ pub async fn run(cli: Cli, project_root: PathBuf) -> Result<i32, Box<dyn std::er
                 };
                 let mut bench_cfg = config::load(&p, false)?;
                 if let Some(m) = &model
-                    && freedas_catalog::get_model(&freedas_catalog::builtin_catalog(), m)
-                        .is_none()
+                    && freedas_catalog::get_model(&freedas_catalog::builtin_catalog(), m).is_none()
                 {
                     eprintln!(
                         "freedas: --model {m:?} is not in the catalog;                          an unknown pin runs unpriced and unfiltered"
@@ -1795,16 +1796,12 @@ pub async fn run(cli: Cli, project_root: PathBuf) -> Result<i32, Box<dyn std::er
                                 continue;
                             }
                             if task.base_branch.starts_with('-')
-                                || !task
-                                    .base_branch
-                                    .bytes()
-                                    .all(|b| b.is_ascii_alphanumeric()
-                                        || matches!(b, b'-' | b'_' | b'.' | b'/'))
+                                || !task.base_branch.bytes().all(|b| {
+                                    b.is_ascii_alphanumeric()
+                                        || matches!(b, b'-' | b'_' | b'.' | b'/')
+                                })
                             {
-                                eprintln!(
-                                    "bench {} skipped: invalid base_branch",
-                                    flat(&task.id)
-                                );
+                                eprintln!("bench {} skipped: invalid base_branch", flat(&task.id));
                                 continue;
                             }
                             let dest = p.cache_dir.join("bench").join(&task.id);
@@ -1909,7 +1906,12 @@ pub async fn run(cli: Cli, project_root: PathBuf) -> Result<i32, Box<dyn std::er
                         } else {
                             " (unverified)"
                         };
-                        println!("{} {}{}", flat(r["task"].as_str().unwrap_or_default()), status, suffix);
+                        println!(
+                            "{} {}{}",
+                            flat(r["task"].as_str().unwrap_or_default()),
+                            status,
+                            suffix
+                        );
                     }
                 }
                 Ok(0)
@@ -1940,7 +1942,7 @@ pub async fn run(cli: Cli, project_root: PathBuf) -> Result<i32, Box<dyn std::er
         Some(Commands::Upgrade { version }) => {
             let target = version.unwrap_or_else(|| "latest".to_string());
             let base = std::env::var("FREEDAS_RELEASE_BASE")
-                .unwrap_or_else(|_| "https://github.com/freedas/freedas/releases".to_string());
+                .unwrap_or_else(|_| "https://github.com/vindeckyy/freedas/releases".to_string());
             let manifest_url = format!("{base}/{target}/download/latest.json");
             println!("checking {manifest_url} …");
             let client = reqwest::Client::builder()

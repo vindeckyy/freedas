@@ -593,7 +593,8 @@ mod tests {
     #[test]
     fn every_row_validates_and_ids_stay_pin_compatible() {
         for m in builtin_catalog() {
-            m.validate().unwrap_or_else(|e| panic!("{}: {e}", m.full_id()));
+            m.validate()
+                .unwrap_or_else(|e| panic!("{}: {e}", m.full_id()));
             assert_eq!(m.full_id().matches('/').count(), 1);
         }
         // Zero-priced rows are always free tier, including the non-*-free ids.

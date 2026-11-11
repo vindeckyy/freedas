@@ -1,6 +1,6 @@
 # Contributing
 
-The full guide is [CONTRIBUTING.md](https://github.com/freedas/freedas/blob/main/CONTRIBUTING.md)
+The full guide is [CONTRIBUTING.md](https://github.com/vindeckyy/freedas/blob/main/CONTRIBUTING.md)
 at the repository root. Summary:
 
 ## Setup

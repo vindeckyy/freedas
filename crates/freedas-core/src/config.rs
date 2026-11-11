@@ -594,15 +594,10 @@ fn sanitize_project_layer(json: &mut serde_json::Value, cand: &Path, trusted: bo
             let Some(srv) = server.as_object_mut() else {
                 continue;
             };
-            let bad_cwd = srv
-                .get("cwd")
-                .and_then(|c| c.as_str())
-                .is_some_and(|cwd| {
-                    let p = Path::new(cwd);
-                    p.is_absolute()
-                        || p.components()
-                            .any(|c| matches!(c, Component::ParentDir))
-                });
+            let bad_cwd = srv.get("cwd").and_then(|c| c.as_str()).is_some_and(|cwd| {
+                let p = Path::new(cwd);
+                p.is_absolute() || p.components().any(|c| matches!(c, Component::ParentDir))
+            });
             if bad_cwd {
                 srv.remove("cwd");
                 eprintln!(
@@ -614,11 +609,32 @@ fn sanitize_project_layer(json: &mut serde_json::Value, cand: &Path, trusted: bo
     }
     // Unknown keys ride through `extra` silently; name them for project files.
     const KNOWN: &[&str] = &[
-        "$schema", "schema", "model", "small_model", "variant", "permission_mode",
-        "default_agent", "subagent_depth", "disabled_providers", "instructions",
-        "skills", "permission", "memory", "router", "standards", "sandbox",
-        "snapshots", "trust_project_code", "mcp", "plugin", "server", "websearch",
-        "telemetry", "workspace", "theme", "max_steps",
+        "$schema",
+        "schema",
+        "model",
+        "small_model",
+        "variant",
+        "permission_mode",
+        "default_agent",
+        "subagent_depth",
+        "disabled_providers",
+        "instructions",
+        "skills",
+        "permission",
+        "memory",
+        "router",
+        "standards",
+        "sandbox",
+        "snapshots",
+        "trust_project_code",
+        "mcp",
+        "plugin",
+        "server",
+        "websearch",
+        "telemetry",
+        "workspace",
+        "theme",
+        "max_steps",
     ];
     let unknown: Vec<&str> = obj
         .keys()
@@ -669,7 +685,8 @@ fn missing_env_vars_error(json: &serde_json::Value, cand: &Path) -> Result<(), F
                     match tail.find('}') {
                         Some(end) => {
                             let var = &tail[..end];
-                            if std::env::var_os(var).is_none() && !missing.iter().any(|m| m == var) {
+                            if std::env::var_os(var).is_none() && !missing.iter().any(|m| m == var)
+                            {
                                 missing.push(var.to_string());
                             }
                             rest = &tail[end + 1..];
@@ -1049,9 +1066,7 @@ pub fn load(paths: &Paths, disable_project: bool) -> Result<Config, FreedasError
     // then project files (unless disabled), then the environment.
     if let Ok(explicit) = std::env::var("FREEDAS_CONFIG") {
         // One file replaces the system, global, org, and project layers.
-        tracing::warn!(
-            "FREEDAS_CONFIG={explicit}: this file replaces all config layers"
-        );
+        tracing::warn!("FREEDAS_CONFIG={explicit}: this file replaces all config layers");
         load_into(Path::new(&explicit), &mut merged, Layer::Global, true)?;
     } else {
         for cand in global_candidates(paths) {
@@ -1370,11 +1385,7 @@ mod tests {
         // Default discovery stops at the project root: ancestors cannot plant
         // config. The legacy walk is available only via explicit opt-in.
         let capped = project_candidates(&paths, false);
-        assert!(
-            capped
-                .iter()
-                .all(|x| x.starts_with(&paths.project_root))
-        );
+        assert!(capped.iter().all(|x| x.starts_with(&paths.project_root)));
         let c = project_candidates(&paths, true);
         let repo = dir.path().join("repo");
         let at = |p: PathBuf| c.iter().position(|x| *x == p).unwrap();

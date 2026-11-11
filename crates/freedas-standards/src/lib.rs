@@ -115,7 +115,14 @@ pub async fn run_gate_cancellable(
     cancel: &CancellationToken,
     sandbox_required: bool,
 ) -> GateResult {
-    run_gate_with_budget(project_root, commands, cancel, GATE_TIMEOUT, sandbox_required).await
+    run_gate_with_budget(
+        project_root,
+        commands,
+        cancel,
+        GATE_TIMEOUT,
+        sandbox_required,
+    )
+    .await
 }
 
 async fn run_gate_with_budget(
@@ -328,8 +335,7 @@ mod tests {
             cancel.cancel();
         });
         let started = std::time::Instant::now();
-        let r =
-            run_gate_cancellable(dir.path(), &["sleep 30".to_string()], &token, false).await;
+        let r = run_gate_cancellable(dir.path(), &["sleep 30".to_string()], &token, false).await;
         assert!(!r.passed);
         assert!(r.summary.contains("cancelled"));
         assert!(started.elapsed() < Duration::from_secs(5));

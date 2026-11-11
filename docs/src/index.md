@@ -8,7 +8,7 @@ runs on your machine or on services you host yourself.
 ## Install
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/freedas/freedas/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/vindeckyy/freedas/main/install.sh | bash
 ```
 
 macOS and Linux, and Windows through WSL. No sudo required. See

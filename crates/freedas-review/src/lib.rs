@@ -811,7 +811,9 @@ async fn pr_diff(
         // A pinned review must never silently describe the floating head —
         // the verdict posts against `head_sha` either way.
         if !valid_head_sha(head_sha) {
-            return Err(format!("pinned head_sha {head_sha:?} is not a git object id"));
+            return Err(format!(
+                "pinned head_sha {head_sha:?} is not a git object id"
+            ));
         }
         return pinned_pr_diff(root, number, head_sha, token).await;
     }
@@ -845,9 +847,7 @@ async fn pinned_pr_diff(
     let repo = github_repo(&remote).ok_or_else(|| format!("not a GitHub remote: {remote}"))?;
     let client = reqwest::Client::new();
     let pull: serde_json::Value = client
-        .get(format!(
-            "{api_base}/repos/{repo}/pulls/{number}"
-        ))
+        .get(format!("{api_base}/repos/{repo}/pulls/{number}"))
         .header("Accept", "application/vnd.github+json")
         .header("User-Agent", "freedas")
         .bearer_auth(&token)
@@ -894,9 +894,7 @@ async fn github_pr_diff(root: &Path, number: u64) -> Result<String, String> {
     let remote = git_out(root, &["remote", "get-url", "origin"]).await?;
     let repo = github_repo(&remote).ok_or_else(|| format!("not a GitHub remote: {remote}"))?;
     let response = reqwest::Client::new()
-        .get(format!(
-            "{api_base}/repos/{repo}/pulls/{number}"
-        ))
+        .get(format!("{api_base}/repos/{repo}/pulls/{number}"))
         .header("Accept", "application/vnd.github.v3.diff")
         .header("User-Agent", "freedas")
         .bearer_auth(token)

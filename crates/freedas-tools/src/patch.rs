@@ -238,9 +238,9 @@ impl Tool for ApplyPatchTool {
                 FreedasError::Tool(format!("delete target unreadable: {path}: {e}"))
             })?;
             if content.is_empty() {
-                tokio::fs::remove_file(abs).await.map_err(|e| {
-                    FreedasError::Tool(format!("delete failed: {path}: {e}"))
-                })?;
+                tokio::fs::remove_file(abs)
+                    .await
+                    .map_err(|e| FreedasError::Tool(format!("delete failed: {path}: {e}")))?;
             } else {
                 return Err(FreedasError::Tool(format!("delete did not remove {path}")));
             }

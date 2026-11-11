@@ -1250,7 +1250,8 @@ fn event_loop(
     let (mut auto, mut manual) = permission_mode.flags();
     let timing = std::env::var_os("FREEDAS_TUI_TIMING").is_some();
     let t0 = Instant::now();
-    let mut commands = discover_commands(&project_root, &paths, &cfg.skills, cfg.trust_project_code);
+    let mut commands =
+        discover_commands(&project_root, &paths, &cfg.skills, cfg.trust_project_code);
     if timing {
         eprintln!("discover_commands: {:?}", t0.elapsed());
     }
@@ -1769,7 +1770,13 @@ fn event_loop(
                 let safe_action = sanitize_terminal(action);
                 let safe_resource = sanitize_terminal(resource);
                 let safe_preview = preview.as_deref().map(sanitize_terminal);
-                view::draw_permission(f, area, &safe_action, &safe_resource, safe_preview.as_deref());
+                view::draw_permission(
+                    f,
+                    area,
+                    &safe_action,
+                    &safe_resource,
+                    safe_preview.as_deref(),
+                );
             }
             if shortcuts_open {
                 view::draw_shortcuts(f, area);
@@ -1973,7 +1980,10 @@ fn event_loop(
                     };
                     transcript.push_assistant(text);
                     if show_thinking {
-                        for p in db.list_parts(&result.session_id, &result.message_id).unwrap_or_default() {
+                        for p in db
+                            .list_parts(&result.session_id, &result.message_id)
+                            .unwrap_or_default()
+                        {
                             if p.kind == "reasoning" {
                                 let text = serde_json::from_str::<serde_json::Value>(&p.data)
                                     .ok()
@@ -2348,8 +2358,12 @@ fn event_loop(
                                         &path,
                                         value,
                                     ) {
-                                        commands =
-                                            discover_commands(&project_root, &paths, &cfg.skills, cfg.trust_project_code);
+                                        commands = discover_commands(
+                                            &project_root,
+                                            &paths,
+                                            &cfg.skills,
+                                            cfg.trust_project_code,
+                                        );
                                         slash_items = slash_rows(&commands);
                                         help_text = help_lines(&commands);
                                         file_items = project_file_rows(&project_root);
@@ -3228,12 +3242,9 @@ fn event_loop(
                                                         // Exports can carry
                                                         // secrets; keep them
                                                         // out of the repo.
-                                                        let dir = paths
-                                                            .data_dir
-                                                            .join("exports");
+                                                        let dir = paths.data_dir.join("exports");
                                                         let _ = std::fs::create_dir_all(&dir);
-                                                        let path =
-                                                            dir.join(format!("{sid}.json"));
+                                                        let path = dir.join(format!("{sid}.json"));
                                                         match std::fs::write(&path, json) {
                                                             Ok(()) => transcript.push(format!(
                                                                 "exported {}",
@@ -3252,8 +3263,7 @@ fn event_loop(
                                                 if sanitize {
                                                     out = freedas_core::redact::redact(&out);
                                                 }
-                                                let dir =
-                                                    paths.data_dir.join("exports");
+                                                let dir = paths.data_dir.join("exports");
                                                 let _ = std::fs::create_dir_all(&dir);
                                                 let path = dir.join(format!("{sid}.md"));
                                                 match std::fs::write(&path, out) {
@@ -3269,9 +3279,9 @@ fn event_loop(
                                             transcript.push("no session".into());
                                         }
                                     }
-                                    "copy" => match copy_to_clipboard(&freedas_core::redact::redact(
-                                        &transcript.render(),
-                                    )) {
+                                    "copy" => match copy_to_clipboard(
+                                        &freedas_core::redact::redact(&transcript.render()),
+                                    ) {
                                         Ok(()) => {
                                             transcript.push("transcript copied to clipboard".into())
                                         }
@@ -3371,7 +3381,10 @@ fn event_loop(
                                         }
                                     }
                                     "agents" => {
-                                        let agents = freedas_agent::merged_agents(&project_root, cfg.trust_project_code);
+                                        let agents = freedas_agent::merged_agents(
+                                            &project_root,
+                                            cfg.trust_project_code,
+                                        );
                                         if args.is_empty() {
                                             for a in &agents {
                                                 transcript.push(format!(
@@ -3970,7 +3983,13 @@ fn event_loop(
                                             if show_thinking { "shown" } else { "hidden" }
                                         ));
                                         if show_thinking && let Some(mid) = &last_message {
-                                            for p in db.list_parts(current_session.as_deref().unwrap_or_default(), mid).unwrap_or_default() {
+                                            for p in db
+                                                .list_parts(
+                                                    current_session.as_deref().unwrap_or_default(),
+                                                    mid,
+                                                )
+                                                .unwrap_or_default()
+                                            {
                                                 if p.kind == "reasoning" {
                                                     let text =
                                                         serde_json::from_str::<serde_json::Value>(
@@ -4045,7 +4064,12 @@ fn event_loop(
                                         }
                                     }
                                 }
-                                commands = discover_commands(&project_root, &paths, &cfg.skills, cfg.trust_project_code);
+                                commands = discover_commands(
+                                    &project_root,
+                                    &paths,
+                                    &cfg.skills,
+                                    cfg.trust_project_code,
+                                );
                                 slash_items = slash_rows(&commands);
                                 continue;
                             }
@@ -4134,14 +4158,12 @@ fn event_loop(
                                 }
                                 continue;
                             }
-                            let agents: Vec<String> = freedas_agent::merged_agents(
-                                &project_root,
-                                cfg.trust_project_code,
-                            )
-                                .into_iter()
-                                .filter(|a| a.mode == "primary" || a.mode == "all")
-                                .map(|a| a.id)
-                                .collect();
+                            let agents: Vec<String> =
+                                freedas_agent::merged_agents(&project_root, cfg.trust_project_code)
+                                    .into_iter()
+                                    .filter(|a| a.mode == "primary" || a.mode == "all")
+                                    .map(|a| a.id)
+                                    .collect();
                             if !agents.is_empty() {
                                 let next = match (agents.iter().position(|a| a == &agent), back) {
                                     (Some(i), false) => (i + 1) % agents.len(),

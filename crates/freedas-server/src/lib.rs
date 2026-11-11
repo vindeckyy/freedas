@@ -240,8 +240,7 @@ fn is_loopback_host(host: &str) -> bool {
 /// HTTP/1.0 clients that cannot send one.
 fn host_allowed(headers: &HeaderMap) -> bool {
     let Some(host) = headers.get(header::HOST).and_then(|v| v.to_str().ok()) else {
-        return std::env::var("FREEDAS_SERVER_ALLOW_MISSING_HOST")
-            .is_ok_and(|v| v == "1");
+        return std::env::var("FREEDAS_SERVER_ALLOW_MISSING_HOST").is_ok_and(|v| v == "1");
     };
     let host = host.rsplit_once(':').map(|(h, _)| h).unwrap_or(host);
     is_loopback_host(host)
@@ -407,7 +406,10 @@ pub fn app(db: Arc<Db>, paths: Paths) -> Router {
 async fn spa() -> impl axum::response::IntoResponse {
     (
         [
-            (header::CONTENT_SECURITY_POLICY.as_str(), "default-src 'self'; connect-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'self'; frame-ancestors 'none'"),
+            (
+                header::CONTENT_SECURITY_POLICY.as_str(),
+                "default-src 'self'; connect-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'self'; frame-ancestors 'none'",
+            ),
             (header::X_CONTENT_TYPE_OPTIONS.as_str(), "nosniff"),
             (header::REFERRER_POLICY.as_str(), "no-referrer"),
             (header::CACHE_CONTROL.as_str(), "no-store"),
@@ -421,7 +423,6 @@ pub fn app_with_auth(db: Arc<Db>, paths: Paths, auth: Auth) -> Router {
     let state = AppState::new(db, paths);
     Router::new()
         .route("/", get(spa))
-
         .route("/global/health", get(health))
         .route("/doc", get(openapi_doc))
         .route("/project", get(list_projects))
@@ -1372,14 +1373,20 @@ async fn post_command(
             command.agent.clone()
         }
         Some(a) => {
-            return Err(bad_request(format!("unknown agent '{a}' in command {}", body.name)));
+            return Err(bad_request(format!(
+                "unknown agent '{a}' in command {}",
+                body.name
+            )));
         }
         None => None,
     };
     let model = match &command.model {
         Some(m) if freedas_core::config::check_model(m).is_ok() => command.model.clone(),
         Some(m) => {
-            return Err(bad_request(format!("invalid model '{m}' in command {}", body.name)));
+            return Err(bad_request(format!(
+                "invalid model '{m}' in command {}",
+                body.name
+            )));
         }
         None => None,
     };

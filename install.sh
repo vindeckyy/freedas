@@ -53,7 +53,7 @@ fi
 Asset="freedas-${triple}.tar.gz"
 # `FREEDAS_RELEASE_BASE` points the installer at a mirror (or a local
 # `file://` directory in tests); the default is the GitHub release page.
-BASE="${FREEDAS_RELEASE_BASE:-https://github.com/freedas/freedas/releases}"
+BASE="${FREEDAS_RELEASE_BASE:-https://github.com/vindeckyy/freedas/releases}"
 case "$BASE" in
   https://*|file://*) ;;
   *) echo "FREEDAS_RELEASE_BASE must be an https:// or file:// URL" >&2; exit 2 ;;

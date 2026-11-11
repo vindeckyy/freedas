@@ -153,7 +153,10 @@ pub fn discover(project_root: &Path) -> Vec<PluginInfo> {
             plugins.push(info);
         }
     }
-    for info in scan_plugins(&global).into_iter().chain(scan_installed(&installed)) {
+    for info in scan_plugins(&global)
+        .into_iter()
+        .chain(scan_installed(&installed))
+    {
         if seen.insert(info.id.clone()) {
             plugins.push(info);
         }

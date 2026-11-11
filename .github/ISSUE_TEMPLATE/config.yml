@@ -1,8 +1,8 @@
 blank_issues_enabled: false
 contact_links:
   - name: Report a security vulnerability
-    url: https://github.com/freedas/freedas/security/policy
+    url: https://github.com/vindeckyy/freedas/security/policy
     about: Do not file a public issue. See SECURITY.md via the security policy page.
   - name: Questions and usage help
-    url: https://github.com/freedas/freedas/tree/main/docs/src
+    url: https://github.com/vindeckyy/freedas/tree/main/docs/src
     about: Check the docs first; the CLI reference is docs/src/cli.md.

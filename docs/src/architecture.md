@@ -8,7 +8,7 @@ attaches the TUI, `freedas serve` runs it alone, `freedas attach` connects a
 second client, and `freedas run --attach` drives a remote server.
 
 For the crate map, data flow, module responsibilities, and the session
-runner's step loop, read [ARCHITECTURE.md](https://github.com/freedas/freedas/blob/main/ARCHITECTURE.md)
+runner's step loop, read [ARCHITECTURE.md](https://github.com/vindeckyy/freedas/blob/main/ARCHITECTURE.md)
 at the repository root. It is the authoritative document; this page only
 summarizes.
 

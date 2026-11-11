@@ -825,8 +825,9 @@ impl Db {
         id: &str,
     ) -> Result<Option<(String, String, String, String, Option<String>)>> {
         let conn = self.lock();
-        let mut stmt = conn
-            .prepare("SELECT scope, kind, text, confidence, project_id FROM memories WHERE id = ?1")?;
+        let mut stmt = conn.prepare(
+            "SELECT scope, kind, text, confidence, project_id FROM memories WHERE id = ?1",
+        )?;
         let mut rows = stmt.query_map(params![id], |r| {
             Ok((
                 r.get::<_, String>(0)?,
@@ -843,7 +844,11 @@ impl Db {
     /// not defeat the tombstone.
     fn memory_hash(text: &str) -> String {
         use sha2::Digest;
-        let norm: String = text.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase();
+        let norm: String = text
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .to_lowercase();
         sha2::Sha256::digest(norm.as_bytes())
             .iter()
             .map(|b| format!("{b:02x}"))

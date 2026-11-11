@@ -198,10 +198,7 @@ async fn daemon_registers_and_accepts_dashboard_prompts() {
     // broadcast — the dashboard channel is the only subscriber).
     let mut seen_prompt = false;
     let mut sse = client
-        .get(fixture.http(&format!(
-            "/events?session_id={}",
-            fixture.session_id
-        )))
+        .get(fixture.http(&format!("/events?session_id={}", fixture.session_id)))
         .send()
         .await
         .unwrap();

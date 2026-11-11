@@ -441,7 +441,8 @@ fn spawn_heartbeat(
 pub fn check_sandbox_id(id: &str) -> Result<(), String> {
     let ok = !id.is_empty()
         && id.len() <= 64
-        && id.bytes()
+        && id
+            .bytes()
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'));
     if ok {
         Ok(())
@@ -1221,7 +1222,7 @@ async fn docker_run(
         let commit_cmd = argv(&[
             "git",
             "-c",
-            "user.email=runner@freedas.dev",
+            "user.email=freedas-runner@localhost",
             "-c",
             "user.name=Freedas Runner",
             "commit",
@@ -1310,12 +1311,12 @@ pub fn k8s_job_manifest(
     serde_json::json!({
         "apiVersion": "batch/v1",
         "kind": "Job",
-        "metadata": { "name": job_name(id), "namespace": namespace, "labels": { "freedas.io/sandbox": id } },
+        "metadata": { "name": job_name(id), "namespace": namespace, "labels": { "app.kubernetes.io/name": "freedas", "app.kubernetes.io/managed-by": "freedas", "app.kubernetes.io/instance": id } },
         "spec": {
             "activeDeadlineSeconds": session_limit_seconds,
             "ttlSecondsAfterFinished": 300,
             "template": {
-                "metadata": { "labels": { "freedas.io/sandbox": id } },
+                "metadata": { "labels": { "app.kubernetes.io/name": "freedas", "app.kubernetes.io/managed-by": "freedas", "app.kubernetes.io/instance": id } },
                 "spec": {
                     "automountServiceAccountToken": false,
                     "restartPolicy": "Never",
@@ -1413,7 +1414,7 @@ pub fn k8s_network_policy_manifest(id: &str, namespace: &str) -> serde_json::Val
         "kind": "NetworkPolicy",
         "metadata": { "name": k8s_network_policy_name(id), "namespace": namespace },
         "spec": {
-            "podSelector": { "matchLabels": { "freedas.io/sandbox": id } },
+            "podSelector": { "matchLabels": { "app.kubernetes.io/instance": id } },
             "policyTypes": ["Egress"],
             "egress": [
                 { "ports": [{ "protocol": "UDP", "port": 53 }, { "protocol": "TCP", "port": 53 }] },
@@ -2030,11 +2031,11 @@ mod tests {
         let netpol = k8s_network_policy_manifest("sbx_01", "freedas-sandboxes");
         assert_eq!(netpol["kind"], "NetworkPolicy");
         assert_eq!(
-            netpol["spec"]["podSelector"]["matchLabels"]["freedas.io/sandbox"],
+            netpol["spec"]["podSelector"]["matchLabels"]["app.kubernetes.io/instance"],
             "sbx_01"
         );
         assert_eq!(
-            m["spec"]["template"]["metadata"]["labels"]["freedas.io/sandbox"],
+            m["spec"]["template"]["metadata"]["labels"]["app.kubernetes.io/instance"],
             "sbx_01"
         );
     }

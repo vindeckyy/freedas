@@ -339,8 +339,12 @@ fn candidate<'a>(
     class: TaskClass,
 ) -> Candidate<'a> {
     let output = model.max_output.min(class.output_budget());
-    let cost = model.usage_cost(ctx.estimated_input_tokens, ctx.estimated_cached_input, 0, output)
-        + (1.0 - quality as f64) * 0.02;
+    let cost = model.usage_cost(
+        ctx.estimated_input_tokens,
+        ctx.estimated_cached_input,
+        0,
+        output,
+    ) + (1.0 - quality as f64) * 0.02;
     Candidate {
         model,
         cost: if cost.is_finite() { cost } else { f64::MAX },

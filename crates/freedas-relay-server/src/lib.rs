@@ -111,7 +111,9 @@ impl RelayState {
     /// Consume a ticket once; expired or unknown tickets are refused.
     fn take_ticket(&self, ticket: &str) -> bool {
         let mut tickets = self.tickets.lock().expect("tickets lock poisoned");
-        tickets.remove(ticket).is_some_and(|at| at.elapsed() < TICKET_TTL)
+        tickets
+            .remove(ticket)
+            .is_some_and(|at| at.elapsed() < TICKET_TTL)
     }
 }
 

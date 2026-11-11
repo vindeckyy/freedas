@@ -126,7 +126,8 @@ pub fn parse_task_yaml(text: &str) -> Result<Task, String> {
     let id_ok = !id.is_empty()
         && id.len() <= 64
         && !id.contains("..")
-        && id.bytes()
+        && id
+            .bytes()
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_'));
     if !id_ok {
         return Err(format!("task.yaml id {id:?} must match [A-Za-z0-9_-]"));
@@ -161,9 +162,7 @@ fn strip_comment(value: &str) -> &str {
 
 pub fn list_tasks(suite: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
-    let root = suite
-        .canonicalize()
-        .unwrap_or_else(|_| suite.to_path_buf());
+    let root = suite.canonicalize().unwrap_or_else(|_| suite.to_path_buf());
     if let Ok(entries) = std::fs::read_dir(suite) {
         for e in entries.flatten() {
             // Symlinked entries would pull task content from outside the suite.
@@ -223,26 +222,25 @@ pub async fn run_task_tests_verified(repo: &Path, task_dir: &Path) -> TaskOutcom
         .canonicalize()
         .map(|c| c.starts_with(&task_root))
         .unwrap_or(false);
-    let (program, args, task_env): (String, Vec<String>, Vec<(String, String)>) = if script.exists()
-        && script_ok
-    {
-        (
-            "/bin/bash".to_string(),
-            vec![script.to_string_lossy().into_owned()],
-            vec![(
-                "TASK_DIR".to_string(),
-                tests_dir.to_string_lossy().into_owned(),
-            )],
-        )
-    } else if repo.join("Cargo.toml").exists() {
-        ("cargo".to_string(), vec!["test".to_string()], Vec::new())
-    } else if repo.join("package.json").exists() {
-        ("npm".to_string(), vec!["test".to_string()], Vec::new())
-    } else if repo.join("pyproject.toml").exists() {
-        ("pytest".to_string(), Vec::new(), Vec::new())
-    } else {
-        return fail(true);
-    };
+    let (program, args, task_env): (String, Vec<String>, Vec<(String, String)>) =
+        if script.exists() && script_ok {
+            (
+                "/bin/bash".to_string(),
+                vec![script.to_string_lossy().into_owned()],
+                vec![(
+                    "TASK_DIR".to_string(),
+                    tests_dir.to_string_lossy().into_owned(),
+                )],
+            )
+        } else if repo.join("Cargo.toml").exists() {
+            ("cargo".to_string(), vec!["test".to_string()], Vec::new())
+        } else if repo.join("package.json").exists() {
+            ("npm".to_string(), vec!["test".to_string()], Vec::new())
+        } else if repo.join("pyproject.toml").exists() {
+            ("pytest".to_string(), Vec::new(), Vec::new())
+        } else {
+            return fail(true);
+        };
     let policy = freedas_sandbox::SandboxPolicy {
         read: vec![repo.to_path_buf(), task_dir.to_path_buf()],
         write: vec![repo.to_path_buf()],

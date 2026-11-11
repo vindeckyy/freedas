@@ -129,17 +129,20 @@ pub fn workspace_root_within(file: &Path, ceiling: &Path) -> PathBuf {
         "Makefile",
         ".git",
     ];
-    let ceiling = ceiling.canonicalize().unwrap_or_else(|_| ceiling.to_path_buf());
+    let ceiling = ceiling
+        .canonicalize()
+        .unwrap_or_else(|_| ceiling.to_path_buf());
     let mut cur = file.parent();
     let fallback = cur.unwrap_or(file).to_path_buf();
     while let Some(dir) = cur {
         if !dir.starts_with(&ceiling) {
             break;
         }
-        if MANIFESTS
-            .iter()
-            .any(|m| dir.join(m).symlink_metadata().is_ok_and(|m| !m.file_type().is_symlink()))
-        {
+        if MANIFESTS.iter().any(|m| {
+            dir.join(m)
+                .symlink_metadata()
+                .is_ok_and(|m| !m.file_type().is_symlink())
+        }) {
             return dir.to_path_buf();
         }
         cur = dir.parent();
@@ -240,10 +243,7 @@ pub async fn lsp_request(
         .await
         .map_err(|e| format!("{}: {e}", abs.display()))?;
     if bytes.len() as u64 > MAX_FILE_BYTES {
-        return Err(format!(
-            "{} too large (>1 MiB)",
-            abs.display()
-        ));
+        return Err(format!("{} too large (>1 MiB)", abs.display()));
     }
     let text = String::from_utf8(bytes).map_err(|_| format!("{} is not utf-8", abs.display()))?;
     let bin = resolve_server(server).ok_or_else(|| format!("{server} not found on PATH"))?;
@@ -261,7 +261,15 @@ pub async fn lsp_request(
     // find its own helpers, HOME/TMPDIR/LANG for sane defaults) — never the
     // provider keys sitting in ours.
     cmd.env_clear();
-    for key in ["PATH", "HOME", "TMPDIR", "LANG", "USERPROFILE", "GOPATH", "GOCACHE"] {
+    for key in [
+        "PATH",
+        "HOME",
+        "TMPDIR",
+        "LANG",
+        "USERPROFILE",
+        "GOPATH",
+        "GOCACHE",
+    ] {
         if let Ok(v) = std::env::var(key) {
             cmd.env(key, v);
         }
@@ -605,9 +613,13 @@ mod tests {
     #[tokio::test]
     async fn missing_file_is_err() {
         assert!(
-            diagnostics("rust-analyzer", Path::new("/nonexistent/freedas.rs"), Path::new("/"))
-                .await
-                .is_err()
+            diagnostics(
+                "rust-analyzer",
+                Path::new("/nonexistent/freedas.rs"),
+                Path::new("/")
+            )
+            .await
+            .is_err()
         );
     }
 }

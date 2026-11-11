@@ -562,7 +562,14 @@ pub(crate) fn check_perm_with_preview(
         &ctx.config,
         &rules_for(ctx),
     );
-    finish(ctx, effect, (action.to_string(), res), preview, false, false)
+    finish(
+        ctx,
+        effect,
+        (action.to_string(), res),
+        preview,
+        false,
+        false,
+    )
 }
 /// Check both the user-supplied spelling and the canonical absolute path, so a
 /// rule matching either form (`*.env`, an absolute allow, `..` tricks) still
@@ -1218,8 +1225,8 @@ impl Tool for Bash {
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_nanos())
                 .unwrap_or(0);
-            let dir = std::env::temp_dir()
-                .join(format!("freedas-run-{}-{nanos:x}", std::process::id()));
+            let dir =
+                std::env::temp_dir().join(format!("freedas-run-{}-{nanos:x}", std::process::id()));
             std::fs::create_dir_all(&dir).ok().map(|()| dir)
         };
         let mut write_roots = vec![root.clone()];
