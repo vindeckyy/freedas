@@ -46,16 +46,20 @@ check "blocked exits 3"     "[ $RC -eq 3 ]"
 check "auto-rejecting stderr" "grep -q 'auto-rejecting' '$D/blocked.err'"
 
 echo "== 3b. no sandbox backend =="
-cd "$D"
-mkdir -p fakepath
-for t in bash sh git env uname id cat mkdir touch; do
-  command -v "$t" >/dev/null 2>&1 && ln -sf "$(command -v "$t")" "fakepath/$t"
-done
-OUT=$(PATH="$PWD/fakepath" $BIN run "RUN:touch unsandboxed-marker" --auto --format json 2>"$D/nosandbox.err")
-check "refuses unsandboxed" "echo '$OUT' | grep -qi 'sandbox backend'"
-check "marker not written"  "test ! -e unsandboxed-marker"
-PATH="$PWD/fakepath" FREEDAS_EXPERIMENTAL_SANDBOX=false $BIN run "RUN:touch opted-out-marker" --auto --format json >/dev/null 2>&1
-check "opt-out runs direct" "test -e opted-out-marker"
+if [ "${FREEDAS_EXPERIMENTAL_SANDBOX:-}" = "false" ]; then
+  echo "  skip: the sandbox is disabled for this run (no backend to hide)"
+else
+  cd "$D"
+  mkdir -p fakepath
+  for t in bash sh git env uname id cat mkdir touch; do
+    command -v "$t" >/dev/null 2>&1 && ln -sf "$(command -v "$t")" "fakepath/$t"
+  done
+  OUT=$(PATH="$PWD/fakepath" $BIN run "RUN:touch unsandboxed-marker" --auto --format json 2>"$D/nosandbox.err")
+  check "refuses unsandboxed" "echo '$OUT' | grep -qi 'sandbox backend'"
+  check "marker not written"  "test ! -e unsandboxed-marker"
+  PATH="$PWD/fakepath" FREEDAS_EXPERIMENTAL_SANDBOX=false $BIN run "RUN:touch opted-out-marker" --auto --format json >/dev/null 2>&1
+  check "opt-out runs direct" "test -e opted-out-marker"
+fi
 
 echo "== 4. plan mode =="
 cd "$D"
