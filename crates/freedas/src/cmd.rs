@@ -1568,8 +1568,10 @@ pub async fn run(cli: Cli, project_root: PathBuf) -> Result<i32, Box<dyn std::er
                 .map_err(|e| scrub_url(&e, &url))?;
             let mut target = cli.session.clone();
             if target.is_none() && cli.continue_ {
+                // Most recent root session; child (subagent) rows never resume.
                 target = sessions
-                    .first()
+                    .iter()
+                    .find(|s| s.get("parentID").is_none_or(|p| p.is_null()))
                     .and_then(|s| s.get("id"))
                     .and_then(|v| v.as_str())
                     .map(str::to_string);
@@ -1577,9 +1579,12 @@ pub async fn run(cli: Cli, project_root: PathBuf) -> Result<i32, Box<dyn std::er
             println!("attached to {}", display_url(&url));
             for s in &sessions {
                 let id = s.get("id").and_then(|v| v.as_str()).unwrap_or("");
-                let title = s.get("title").and_then(|v| v.as_str()).unwrap_or("");
+                let title = flat(s.get("title").and_then(|v| v.as_str()).unwrap_or(""));
+                let child = !s.get("parentID").is_none_or(|p| p.is_null());
                 let mark = if target.as_deref() == Some(id) {
                     "*"
+                } else if child {
+                    ">"
                 } else {
                     " "
                 };
@@ -2559,9 +2564,14 @@ async fn attach_run(opts: AttachRun) -> Result<i32, Box<dyn std::error::Error>> 
         )
         .await
         .map_err(|e| format!("attach: {}", scrub_url(&e, &base)))?;
+        // Same rule as local --continue: most recent *root* session, never a
+        // just-finished subagent child.
         session_id = rows
             .as_array()
-            .and_then(|rows| rows.first())
+            .and_then(|rows| {
+                rows.iter()
+                    .find(|s| s.get("parentID").is_none_or(|p| p.is_null()))
+            })
             .and_then(|s| s.get("id"))
             .and_then(|v| v.as_str())
             .map(str::to_string);
