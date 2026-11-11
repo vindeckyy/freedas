@@ -313,6 +313,15 @@ pub async fn run(cli: Cli, project_root: PathBuf) -> Result<i32, Box<dyn std::er
             let fresh_session = session_id.is_none();
             let want_title = title.is_none();
 
+            // A typo'd agent must fail loudly: the fallback is the
+            // unrestricted build agent, which silently widens permissions.
+            if let Some(name) = &agent {
+                let agents = freedas_agent::merged_agents(&project_root, cfg.trust_project_code);
+                if freedas_agent::find(&agents, name).is_none() {
+                    eprintln!("freedas: unknown agent: {name}");
+                    return Ok(2);
+                }
+            }
             let agent_name = agent.unwrap_or(cfg.default_agent.clone());
             let model_opt = model
                 .clone()

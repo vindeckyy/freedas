@@ -560,6 +560,13 @@ async fn create_session(State(s): State<AppState>, Json(body): Json<CreateSessio
     let pid =
         s.db.ensure_project(&s.paths.project_root)
             .map_err(internal)?;
+    if let Some(name) = &body.agent {
+        let agents =
+            freedas_agent::merged_agents(&s.paths.project_root, project_content_trusted(&s));
+        if freedas_agent::find(&agents, name).is_none() {
+            return Err(bad_request(format!("unknown agent: {name}")));
+        }
+    }
     let id =
         s.db.create_session(
             &pid,
@@ -693,6 +700,15 @@ fn spawn_run(s: &AppState, id: String, request: RunRequest) -> Result<(), ApiErr
     } = request;
     if auto && manual {
         return Err(bad_request("auto and manual are mutually exclusive"));
+    }
+    // A typo'd agent must fail loudly: the fallback is the unrestricted
+    // build agent, which silently widens permissions.
+    if let Some(name) = &agent {
+        let agents =
+            freedas_agent::merged_agents(&s.paths.project_root, project_content_trusted(s));
+        if freedas_agent::find(&agents, name).is_none() {
+            return Err(bad_request(format!("unknown agent: {name}")));
+        }
     }
     let cancel = Arc::new(tokio_util::sync::CancellationToken::new());
     {
