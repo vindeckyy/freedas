@@ -18,10 +18,15 @@ JSON-RPC 2.0 on stdin/stdout.
 | `fs/read_text_file` | Permission-gated read |
 | `fs/write_text_file` | Permission-gated write |
 | `terminal/create` | Spawn a terminal (permission-gated, sandboxed where available) |
-| `terminal/output` | Read buffered output |
+| `terminal/output` | Read buffered output; `exitStatus` is set once the process is over |
 | `terminal/wait_for_exit` | Wait for the process |
 | `terminal/kill` | Kill the process |
 | `terminal/release` | Release without killing |
+
+At most 32 terminals may run at once. The cap counts running processes only:
+a terminal whose process has ended holds nothing back, so it never blocks a
+new one, and the newest finished terminals stay readable until they are
+evicted.
 
 A request without a `sessionID` gets a `Session::fallback` rooted at the
 server's cwd.

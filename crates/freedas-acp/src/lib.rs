@@ -118,10 +118,30 @@ impl PermissionApprover for AcpApprover {
 
 struct Terminal {
     session_id: String,
+    /// Creation order; used to evict the oldest finished terminal.
+    seq: u64,
     child: Arc<Mutex<tokio::process::Child>>,
     output: Arc<Mutex<Vec<u8>>>,
     readers: Vec<tokio::task::JoinHandle<()>>,
-    exit: Arc<Mutex<Option<i32>>>,
+    /// Set once the process has exited. `None` while it still runs.
+    exit: Arc<Mutex<Option<std::process::ExitStatus>>>,
+}
+
+impl Terminal {
+    /// Exit status of the process, learning it from the child when the
+    /// process is over but nobody waited for it yet. `try_wait` is
+    /// idempotent, so asking here never steals the status from a waiter.
+    fn exit_status(&self) -> Option<std::process::ExitStatus> {
+        if let Some(status) = *self.exit.lock().expect("exit") {
+            return Some(status);
+        }
+        let status = {
+            let mut child = self.child.lock().expect("child");
+            child.try_wait().ok().flatten()
+        }?;
+        *self.exit.lock().expect("exit") = Some(status);
+        Some(status)
+    }
 }
 
 /// JSON-RPC 2.0 server that speaks newline-delimited JSON on stdio.
@@ -780,7 +800,11 @@ impl AcpServer {
     }
 
     fn terminal_create(&mut self, id: Value, params: &Value) -> Vec<String> {
-        if self.terminals.len() >= MAX_TERMINALS {
+        // A finished terminal holds no process: it must not occupy a slot, or
+        // a client that never releases its terminals wedges the server for
+        // good. Only running terminals count against the cap.
+        self.reap_finished();
+        if self.live_terminals() >= MAX_TERMINALS {
             return vec![rpc_error(id, -32000, "too many terminals".into())];
         }
         let Some((session_id, session)) = self.session(params) else {
@@ -892,6 +916,7 @@ impl AcpServer {
             terminal_id.clone(),
             Terminal {
                 session_id: session_id.clone(),
+                seq: self.next_terminal,
                 child: Arc::new(Mutex::new(child)),
                 output,
                 readers,
@@ -920,7 +945,7 @@ impl AcpServer {
             json!({
                 "output": String::from_utf8_lossy(&bytes),
                 "truncated": bytes.len() >= OUTPUT_CAP,
-                "exitStatus": terminal.exit.lock().expect("exit").map(|code| json!({ "exitCode": code })),
+                "exitStatus": terminal.exit_status().map(|status| json!({ "exitCode": status.code() })),
             }),
         )]
     }
@@ -938,12 +963,6 @@ impl AcpServer {
         if terminal.session_id != session_id {
             return vec![rpc_error(id, -32602, "unknown terminal".into())];
         };
-        if let Some(code) = *terminal.exit.lock().expect("exit") {
-            return vec![response(
-                id,
-                json!({ "exitCode": code, "signal": Value::Null }),
-            )];
-        }
         // Poll off the stdio loop so other requests stay responsive.
         let child = terminal.child.clone();
         let exit = terminal.exit.clone();
@@ -951,13 +970,18 @@ impl AcpServer {
         let pending = self.pending.clone();
         let rid = id.clone();
         tokio::spawn(async move {
-            let code = loop {
+            let status = loop {
+                // The exit may already be known: another terminal was created
+                // since, and the cap reaper noticed the process was over.
+                if let Some(status) = *exit.lock().expect("exit") {
+                    break Ok(status);
+                }
                 let status = {
                     let mut child = child.lock().expect("child");
                     child.try_wait()
                 };
                 match status {
-                    Ok(Some(status)) => break Ok(status.code()),
+                    Ok(Some(status)) => break Ok(status),
                     Ok(None) => tokio::time::sleep(std::time::Duration::from_millis(20)).await,
                     Err(error) => break Err(error),
                 }
@@ -965,10 +989,13 @@ impl AcpServer {
             for reader in readers {
                 let _ = reader.await;
             }
-            let line = match code {
-                Ok(code) => {
-                    *exit.lock().expect("exit") = code;
-                    response(rid, json!({ "exitCode": code, "signal": Value::Null }))
+            let line = match status {
+                Ok(status) => {
+                    *exit.lock().expect("exit") = Some(status);
+                    response(
+                        rid,
+                        json!({ "exitCode": status.code(), "signal": Value::Null }),
+                    )
                 }
                 Err(error) => rpc_error(rid, -32000, error.to_string()),
             };
@@ -990,7 +1017,7 @@ impl AcpServer {
         if terminal.session_id != session_id {
             return vec![rpc_error(id, -32602, "unknown terminal".into())];
         };
-        let running = terminal.exit.lock().expect("exit").is_none();
+        let running = terminal.exit_status().is_none();
         if running && let Ok(mut child) = terminal.child.lock() {
             let _ = child.start_kill();
         }
@@ -1013,6 +1040,43 @@ impl AcpServer {
         }
         self.terminals.remove(terminal_id);
         vec![response(id, json!({}))]
+    }
+
+    /// Terminals whose process is still running. These are the ones that hold
+    /// resources and count against [`MAX_TERMINALS`].
+    fn live_terminals(&self) -> usize {
+        self.terminals
+            .values()
+            .filter(|terminal| terminal.exit_status().is_none())
+            .count()
+    }
+
+    /// Forget the oldest finished terminals, keeping the newest
+    /// [`MAX_TERMINALS`] of them addressable. A finished terminal holds no
+    /// process, so dropping it early is safe; keeping a few lets a client
+    /// still read the output of the runs it just made.
+    fn reap_finished(&mut self) {
+        let mut finished: Vec<(u64, String)> = self
+            .terminals
+            .iter()
+            .filter_map(|(id, terminal)| {
+                terminal
+                    .exit_status()
+                    .map(|_| (terminal.seq, id.to_string()))
+            })
+            .collect();
+        if finished.len() <= MAX_TERMINALS {
+            return;
+        }
+        finished.sort_by_key(|(seq, _)| *seq);
+        let excess = finished.len() - MAX_TERMINALS;
+        for (_, id) in finished.into_iter().take(excess) {
+            if let Some(terminal) = self.terminals.remove(&id) {
+                for reader in terminal.readers {
+                    reader.abort();
+                }
+            }
+        }
     }
 }
 
@@ -1727,6 +1791,74 @@ mod tests {
         )
         .await;
         assert!(!server.terminals.contains_key(&terminal_id));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A terminal whose process is over holds no resources: it must not eat a
+    /// slot, or a client that never releases its terminals wedges the server.
+    #[tokio::test]
+    async fn finished_terminals_do_not_consume_the_cap() {
+        let dir = std::env::temp_dir().join(format!("freedas-acp-cap-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut server = server();
+        let session_id = session_in(&mut server, &dir).await;
+
+        for _ in 0..MAX_TERMINALS {
+            let out = call(
+                &mut server,
+                "terminal/create",
+                json!({ "sessionId": session_id, "command": "true" }),
+            )
+            .await;
+            assert!(out[0]["result"]["terminalId"].is_string(), "{:?}", out[0]);
+        }
+        for _ in 0..200 {
+            if server.terminals.values().all(|t| t.exit_status().is_some()) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(
+            server.terminals.values().all(|t| t.exit_status().is_some()),
+            "every terminal must finish"
+        );
+
+        let out = call(
+            &mut server,
+            "terminal/create",
+            json!({ "sessionId": session_id, "command": "true" }),
+        )
+        .await;
+        assert!(out[0].get("error").is_none(), "{:?}", out[0]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Running terminals still count: the cap is a guard against a runaway
+    /// client, so it must keep the processes it actually holds.
+    #[tokio::test]
+    async fn running_terminals_still_hit_the_cap() {
+        let dir = std::env::temp_dir().join(format!("freedas-acp-cap2-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut server = server();
+        let session_id = session_in(&mut server, &dir).await;
+
+        for _ in 0..MAX_TERMINALS {
+            let out = call(
+                &mut server,
+                "terminal/create",
+                json!({ "sessionId": session_id, "command": "sleep 30" }),
+            )
+            .await;
+            assert!(out[0]["result"]["terminalId"].is_string(), "{:?}", out[0]);
+        }
+        let out = call(
+            &mut server,
+            "terminal/create",
+            json!({ "sessionId": session_id, "command": "sleep 30" }),
+        )
+        .await;
+        let message = out[0]["error"]["message"].as_str().unwrap_or_default();
+        assert!(message.contains("too many terminals"), "got {message}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
