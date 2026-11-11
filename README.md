@@ -16,21 +16,27 @@ yours to run.
 
 ## Benchmarks
 
-The fastest measured harness in every publicly benchmarkable category —
-spawn, time-to-interactive, idle memory, disk footprint, per-prompt
-overhead, and input tokens per request:
+Freedas leads every public launch, footprint, and per-prompt benchmark —
+and sends near-minimal input tokens even with all 17 tools advertised:
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/benchmarks-dark.png">
-  <source media="(prefers-color-scheme: light)" srcset="docs/benchmarks-light.png">
-  <img alt="Freedas benchmark report: freedas ranks first in spawn time, launch-to-interactive, idle memory, disk footprint, per-prompt overhead, and input tokens" src="docs/benchmarks-light.png">
+  <source media="(prefers-color-scheme: dark)" srcset="docs/benchmarks-launch-dark.png">
+  <source media="(prefers-color-scheme: light)" srcset="docs/benchmarks-launch-light.png">
+  <img alt="Freedas launch benchmarks: first in spawn time, ready-to-type, and warm launch" src="docs/benchmarks-launch-light.png">
 </picture>
 
-External numbers are the same-rig medians published at
-[agentty.org](https://agentty.org/benchmarks/) and [ovm.sh](https://ovm.sh/benchmark),
-plus the crewshal TTFT harness-overhead study and the orbi.build
-token-efficiency comparison; Freedas numbers were measured on the release
-build on one machine, so treat margins as directional.
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/benchmarks-footprint-dark.png">
+  <source media="(prefers-color-scheme: light)" srcset="docs/benchmarks-footprint-light.png">
+  <img alt="Freedas footprint and efficiency benchmarks: first in idle memory, disk footprint, and per-prompt overhead; third in input tokens behind deliberately reduced tool configs" src="docs/benchmarks-footprint-light.png">
+</picture>
+
+External numbers are published same-rig results from
+[agentty.org](https://agentty.org/benchmarks/), [ovm.sh](https://ovm.sh/benchmark),
+[graphwiz.ai](https://graphwiz.ai/), the Forcefield launch benchmark, the
+crewshal TTFT harness-overhead study, and orbi.build's token-efficiency
+comparison; Freedas numbers were measured on the release build on one
+machine, so treat margins as directional.
 
 ## Install
 
