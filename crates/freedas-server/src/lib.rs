@@ -607,6 +607,7 @@ async fn rename_session(
         return Err(missing(format!("session {id} not found")));
     }
     s.db.rename_session(&id, &title).map_err(internal)?;
+    s.emit(json!({"type": "session.updated", "sessionID": id, "title": title}));
     Ok(Json(json!({"id": id, "title": title})))
 }
 

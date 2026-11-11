@@ -79,7 +79,7 @@ All JSON, camelCase.
 ## SSE events
 
 `GET /event` streams typed events: `server.connected`, `server.lagged`,
-`server.gap`, `session.created`, `session.deleted`, `session.status`,
+`server.gap`, `session.created`, `session.deleted`, `session.updated`, `session.status`,
 `session.idle`, `session.stopped`, `session.error`, `session.reverted`,
 `session.marker`, `message.updated`, `message.part.delta`,
 `message.part.updated`, `permission.asked`, `permission.replied`,

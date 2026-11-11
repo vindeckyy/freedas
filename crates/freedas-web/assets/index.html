@@ -1375,7 +1375,7 @@ function connect() {
       } else {
         banner("error", "Run failed: " + error);
       }
-    } else if (event.type === "session.created" || event.type === "session.deleted") {
+    } else if (event.type === "session.created" || event.type === "session.deleted" || event.type === "session.updated") {
       await loadSessions();
     }
   };
