@@ -151,17 +151,11 @@ pub async fn run(cli: Cli, project_root: PathBuf) -> Result<i32, Box<dyn std::er
                 }
                 if let Some(sid) = &cli.session {
                     // Same project-scope guard as `run --session`.
-                    match d.session_full(sid)? {
-                        Some(s) if s.project_id == pid => session_id = Some(sid.clone()),
-                        Some(_) => {
-                            eprintln!("freedas: session {sid} belongs to a different project");
-                            return Ok(2);
-                        }
-                        None => {
-                            eprintln!("freedas: session {sid} not found");
-                            return Ok(2);
-                        }
+                    if let Some(msg) = check_session(&d, sid, Some(&pid))? {
+                        eprintln!("{msg}");
+                        return Ok(2);
                     }
+                    session_id = Some(sid.clone());
                 }
                 if cli.fork
                     && let Some(sid) = &session_id
@@ -307,17 +301,11 @@ pub async fn run(cli: Cli, project_root: PathBuf) -> Result<i32, Box<dyn std::er
             if let Some(sid) = session {
                 // Sessions are project-scoped: an id from another project would
                 // resume with this project's root and corrupt both histories.
-                match d.session_full(&sid)? {
-                    Some(s) if s.project_id == pid => session_id = Some(sid),
-                    Some(_) => {
-                        eprintln!("freedas: session {sid} belongs to a different project");
-                        return Ok(2);
-                    }
-                    None => {
-                        eprintln!("freedas: session {sid} not found");
-                        return Ok(2);
-                    }
+                if let Some(msg) = check_session(&d, &sid, Some(&pid))? {
+                    eprintln!("{msg}");
+                    return Ok(2);
                 }
+                session_id = Some(sid);
             }
             if fork && let Some(sid) = &session_id {
                 session_id = Some(d.fork_session(&pid, sid, None)?);
@@ -597,10 +585,14 @@ pub async fn run(cli: Cli, project_root: PathBuf) -> Result<i32, Box<dyn std::er
             }
             crate::SessionCommands::Delete { id } => {
                 safe_id(&id)?;
+                let pid = d.ensure_project(&project_root)?;
+                if let Some(msg) = check_session(&d, &id, Some(&pid))? {
+                    eprintln!("{msg}");
+                    return Ok(2);
+                }
                 println!("deleted={}", d.delete_session(&id)?);
                 // Snapshot trees live under the project id; older layouts also
                 // kept a per-session directory.
-                let pid = d.ensure_project(&project_root)?;
                 for dir in [p.snapshot_dir(&pid).join(&id), p.snapshot_dir(&id)] {
                     if dir.exists() {
                         let _ = std::fs::remove_dir_all(&dir);
@@ -610,11 +602,22 @@ pub async fn run(cli: Cli, project_root: PathBuf) -> Result<i32, Box<dyn std::er
             }
             crate::SessionCommands::Fork { id, at } => {
                 let pid = d.ensure_project(&project_root)?;
+                // Cross-project fork is allowed: it copies the source into the
+                // current project. Only existence is required.
+                if let Some(msg) = check_session(&d, &id, None)? {
+                    eprintln!("{msg}");
+                    return Ok(2);
+                }
                 let new_id = d.fork_session(&pid, &id, at.as_deref())?;
                 println!("{}", new_id);
                 Ok(0)
             }
             crate::SessionCommands::Rename { id, title } => {
+                let pid = d.ensure_project(&project_root)?;
+                if let Some(msg) = check_session(&d, &id, Some(&pid))? {
+                    eprintln!("{msg}");
+                    return Ok(2);
+                }
                 d.rename_session(&id, &title)?;
                 println!("renamed {id}");
                 Ok(0)
@@ -2817,6 +2820,22 @@ fn safe_id(id: &str) -> Result<(), Box<dyn std::error::Error>> {
         return Err(format!("invalid id: {id:?}").into());
     }
     Ok(())
+}
+
+/// Resolve a session id for a project-scoped command. Returns the error line
+/// to print (unknown id, or a foreign-project id when `pid` is given).
+fn check_session(
+    d: &freedas_db::Db,
+    id: &str,
+    pid: Option<&str>,
+) -> Result<Option<String>, Box<dyn std::error::Error>> {
+    match d.session_full(id)? {
+        None => Ok(Some(format!("freedas: session {id} not found"))),
+        Some(s) if pid.is_some_and(|p| s.project_id != p) => Ok(Some(format!(
+            "freedas: session {id} belongs to a different project"
+        ))),
+        _ => Ok(None),
+    }
 }
 
 /// `apply` is a verb, not a format choice: `sync apply --json` still applies.
