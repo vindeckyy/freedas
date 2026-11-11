@@ -48,6 +48,19 @@ fn bad_request(message: impl Into<String>) -> ApiError {
     )
 }
 
+fn conflict(message: impl Into<String>) -> ApiError {
+    (StatusCode::CONFLICT, Json(json!({"error": message.into()})))
+}
+
+/// 409 while a session has a live run; transcript mutations must not
+/// interleave with it.
+fn ensure_idle(s: &AppState, id: &str) -> Result<(), ApiError> {
+    if s.aborts.lock().expect("aborts").contains_key(id) {
+        return Err(conflict(format!("session {id} has a run in progress")));
+    }
+    Ok(())
+}
+
 #[derive(Clone)]
 pub struct AppState {
     pub db: Arc<Db>,
@@ -1060,6 +1073,7 @@ async fn revert_session(State(s): State<AppState>, AxumPath(id): AxumPath<String
     if session_for(&s, &id)?.is_none() {
         return Err(missing(format!("session {id} not found")));
     }
+    ensure_idle(&s, &id)?;
     let messages = s.db.list_messages(&id).map_err(internal)?;
     let index = messages.iter().rposition(|message| message.role == "user");
     let Some(index) = index else {
@@ -1094,6 +1108,7 @@ async fn unrevert_session(State(s): State<AppState>, AxumPath(id): AxumPath<Stri
     if session_for(&s, &id)?.is_none() {
         return Err(missing(format!("session {id} not found")));
     }
+    ensure_idle(&s, &id)?;
     let runner = runner_for(&s);
     match runner.redo(&s.paths.project_root, &id).await {
         Ok(sha) => {
@@ -2261,6 +2276,8 @@ async fn summarize_session(State(s): State<AppState>, AxumPath(id): AxumPath<Str
     if session_for(&s, &id)?.is_none() {
         return Err(missing(format!("session {id} not found")));
     }
+    // Compaction appends a system message to the transcript.
+    ensure_idle(&s, &id)?;
     let summary = runner_for(&s).compact(&id).await.map_err(internal)?;
     Ok(Json(json!({"sessionID": id, "summary": summary})))
 }
