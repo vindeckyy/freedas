@@ -559,17 +559,33 @@ fn spawn_prompt(
                 let seqs = seqs.clone();
                 let session_id = session_id.clone();
                 Arc::new(move |chunk: String| {
-                    let event = match chunk.strip_prefix('\u{1}') {
-                        Some(marker) => json!({
+                    let event = if let Some(marker) = chunk.strip_prefix('\u{1}') {
+                        json!({
                             "type": "relay.marker",
                             "sessionID": session_id,
                             "marker": marker,
-                        }),
-                        None => json!({
+                        })
+                    } else if let Some(json) = chunk.strip_prefix('\u{2}') {
+                        // Tool results must not arrive as assistant text.
+                        serde_json::from_str::<serde_json::Value>(json)
+                            .map(|mut v| {
+                                v["type"] = "tool.result".into();
+                                v["sessionID"] = session_id.clone().into();
+                                v
+                            })
+                            .unwrap_or_else(|_| {
+                                json!({
+                                    "type": "message.part.updated",
+                                    "sessionID": session_id,
+                                    "part": { "kind": "text", "data": { "text": chunk } },
+                                })
+                            })
+                    } else {
+                        json!({
                             "type": "message.part.updated",
                             "sessionID": session_id,
                             "part": { "kind": "text", "data": { "text": chunk } },
-                        }),
+                        })
                     };
                     let _ = send_event(&sender, &seqs, &session_id, event);
                 })

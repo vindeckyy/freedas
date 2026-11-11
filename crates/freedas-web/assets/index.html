@@ -1314,6 +1314,13 @@ function connect() {
       state.live += "\n" + (event.marker || "") + "\n";
       $("live").hidden = false;
       $("live-text").textContent = state.live;
+    } else if (event.type === "tool.result") {
+      if (event.ok === false) {
+        const out = (event.output || "").slice(0, 500);
+        state.live += "\n" + (event.tool || "tool") + " failed: " + out + "\n";
+        $("live").hidden = false;
+        $("live-text").textContent = state.live;
+      }
     } else if (event.type === "message.part.updated") {
       state.live = "";
       $("live").hidden = true;
