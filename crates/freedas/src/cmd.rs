@@ -298,24 +298,27 @@ pub async fn run(cli: Cli, project_root: PathBuf) -> Result<i32, Box<dyn std::er
                 return Ok(5);
             }
             // JSON mode emits one event per line; create the session first so
-            // `session.started` carries its id.
-            if format == "json" && session_id.is_none() {
-                let fallback = prompt.chars().take(80).collect::<String>();
-                let created = d.create_session(
-                    &pid,
-                    &agent_name,
-                    title.as_deref().unwrap_or(&fallback),
-                    cfg.workspace.as_deref(),
-                )?;
+            // `session.started` carries its id. Resumed runs emit it too —
+            // consumers need the id before any other event arrives.
+            if format == "json" {
+                if session_id.is_none() {
+                    let fallback = prompt.chars().take(80).collect::<String>();
+                    let created = d.create_session(
+                        &pid,
+                        &agent_name,
+                        title.as_deref().unwrap_or(&fallback),
+                        cfg.workspace.as_deref(),
+                    )?;
+                    session_id = Some(created);
+                }
                 println!(
                     "{}",
                     serde_json::json!({
                         "type": "session.started",
-                        "sessionID": created,
+                        "sessionID": session_id.as_deref().unwrap_or_default(),
                         "timestamp": freedas_core::paths::now_ms(),
                     })
                 );
-                session_id = Some(created);
             }
             let project_display = project_root.display().to_string();
             let prompt_excerpt: String = prompt.chars().take(200).collect();
