@@ -2616,6 +2616,9 @@ async fn attach_run(opts: AttachRun) -> Result<i32, Box<dyn std::error::Error>> 
                         .into());
                     }
                     "session.idle" => break 'outer,
+                    "session.stopped" if !json_mode => {
+                        eprintln!("session stopped");
+                    }
                     "session.marker" if !json_mode => {
                         if let Some(m) = event.get("marker").and_then(|v| v.as_str()) {
                             eprintln!("{m}");
