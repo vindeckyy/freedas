@@ -523,10 +523,18 @@ fn warn_permissive_config(cand: &Path, layer: Layer) {
     if let Ok(meta) = std::fs::metadata(cand)
         && meta.permissions().mode() & 0o077 != 0
     {
-        eprintln!(
-            "warning: {} is readable by group/other; consider chmod 600",
-            cand.display()
-        );
+        // Config is reloaded several times per command; warn once per path.
+        static WARNED: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+            std::sync::OnceLock::new();
+        let warned = WARNED.get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()));
+        if let Ok(mut set) = warned.lock()
+            && set.insert(cand.display().to_string())
+        {
+            eprintln!(
+                "warning: {} is readable by group/other; consider chmod 600",
+                cand.display()
+            );
+        }
     }
 }
 
