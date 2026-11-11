@@ -2722,6 +2722,19 @@ async fn attach_run(opts: AttachRun) -> Result<i32, Box<dyn std::error::Error>> 
         }
     }
     if json_mode {
+        // Server streams no usage event; pull the totals so attach consumers
+        // see the same fields a local run emits.
+        if let Ok(mut v) = freedas_server::client::request(
+            &client,
+            &format!("{base}/session/{session_id}/usage"),
+            "GET",
+            None,
+        )
+        .await
+        {
+            v["type"] = "usage".into();
+            println!("{v}");
+        }
         println!(
             "{}",
             serde_json::json!({

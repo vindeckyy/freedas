@@ -114,6 +114,7 @@ cd "$D"
 ATTACH_OUT=$($BIN run --attach "http://127.0.0.1:$PORT" "ECHO:attach" --auto --format json 2>/dev/null)
 check "attach started"   "echo '$ATTACH_OUT' | grep -q 'session.started'"
 check "attach completed" "echo '$ATTACH_OUT' | grep -q 'session.completed'"
+check "attach usage"     "echo '$ATTACH_OUT' | grep -q '\"type\":\"usage\"'"
 kill $SRVPID 2>/dev/null
 
 echo "== 11. rules block =="
