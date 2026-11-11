@@ -398,7 +398,18 @@ pub async fn run(cli: Cli, project_root: PathBuf) -> Result<i32, Box<dyn std::er
                         },
                         session_rules: Default::default(),
                     },
-                    tokio_util::sync::CancellationToken::new(),
+                    {
+                        // First Ctrl-C cancels the run gracefully (partial text
+                        // is persisted, in-flight tools abort); a second hits
+                        // the default disposition once this task exits.
+                        let cancel = tokio_util::sync::CancellationToken::new();
+                        let c2 = cancel.clone();
+                        tokio::spawn(async move {
+                            let _ = tokio::signal::ctrl_c().await;
+                            c2.cancel();
+                        });
+                        cancel
+                    },
                 )
                 .await;
             let r = match run {
