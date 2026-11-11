@@ -91,6 +91,19 @@ fn emit(bus: &broadcast::Sender<Value>, events: &EventLog, value: Value) {
     let _ = bus.send(events.push(value));
 }
 
+/// Sessions are scoped to the server's project: an ID minted under another
+/// project must not read or drive this project's runs, the same guard the
+/// CLI applies to `--session`.
+fn session_for(s: &AppState, id: &str) -> Result<Option<freedas_db::SessionFull>, ApiError> {
+    let Some(full) = s.db.session_full(id).map_err(internal)? else {
+        return Ok(None);
+    };
+    let pid =
+        s.db.ensure_project(&s.paths.project_root)
+            .map_err(internal)?;
+    Ok((full.project_id == pid).then_some(full))
+}
+
 /// Bounded ring of recent events tagged with monotonic ids, so an SSE client
 /// that reconnects with `Last-Event-ID` can replay what it missed. Holds the
 /// last 10,000 events in memory only; there is no DB-backed replay for older
@@ -560,7 +573,7 @@ async fn create_session(State(s): State<AppState>, Json(body): Json<CreateSessio
 
 async fn get_session(State(s): State<AppState>, AxumPath(id): AxumPath<String>) -> ApiResult {
     let messages = s.db.list_messages(&id).map_err(internal)?;
-    let Some(full) = s.db.session_full(&id).map_err(internal)? else {
+    let Some(full) = session_for(&s, &id)? else {
         return Err(missing(format!("session {id} not found")));
     };
     Ok(Json(json!({
@@ -585,6 +598,9 @@ async fn get_session(State(s): State<AppState>, AxumPath(id): AxumPath<String>) 
 }
 
 async fn delete_session(State(s): State<AppState>, AxumPath(id): AxumPath<String>) -> ApiResult {
+    if session_for(&s, &id)?.is_none() {
+        return Err(missing(format!("session {id} not found")));
+    }
     let deleted = s.db.delete_session(&id).map_err(internal)?;
     drain_pending(&s.pending_perms, &id);
     s.emit(json!({"type": "session.deleted", "sessionID": id}));
@@ -603,7 +619,7 @@ async fn rename_session(
     Json(body): Json<RenameBody>,
 ) -> ApiResult {
     let title = body.title.unwrap_or_default();
-    if s.db.session_full(&id).map_err(internal)?.is_none() {
+    if session_for(&s, &id)?.is_none() {
         return Err(missing(format!("session {id} not found")));
     }
     s.db.rename_session(&id, &title).map_err(internal)?;
@@ -612,6 +628,9 @@ async fn rename_session(
 }
 
 async fn list_messages(State(s): State<AppState>, AxumPath(id): AxumPath<String>) -> ApiResult {
+    if session_for(&s, &id)?.is_none() {
+        return Err(missing(format!("session {id} not found")));
+    }
     let mut out = Vec::new();
     for m in s.db.list_messages(&id).map_err(internal)? {
         let parts = s.db.list_parts(&id, &m.id).map_err(internal)?;
@@ -876,7 +895,7 @@ async fn post_message(
     AxumPath(id): AxumPath<String>,
     Json(body): Json<PostMessage>,
 ) -> ApiResult {
-    if s.db.session_full(&id).map_err(internal)?.is_none() {
+    if session_for(&s, &id)?.is_none() {
         return Err(missing(format!("session {id} not found")));
     }
     spawn_run(
@@ -905,7 +924,7 @@ async fn prompt_async(
     AxumPath(id): AxumPath<String>,
     Json(body): Json<PostMessage>,
 ) -> ApiResult {
-    if s.db.session_full(&id).map_err(internal)?.is_none() {
+    if session_for(&s, &id)?.is_none() {
         return Err(missing(format!("session {id} not found")));
     }
     spawn_run(
@@ -938,7 +957,10 @@ fn runner_for(s: &AppState) -> freedas_session::Runner {
     )
 }
 
-async fn abort_session(State(s): State<AppState>, AxumPath(id): AxumPath<String>) -> Json<Value> {
+async fn abort_session(State(s): State<AppState>, AxumPath(id): AxumPath<String>) -> ApiResult {
+    if session_for(&s, &id)?.is_none() {
+        return Err(missing(format!("session {id} not found")));
+    }
     let cancelled = s
         .aborts
         .lock()
@@ -951,10 +973,13 @@ async fn abort_session(State(s): State<AppState>, AxumPath(id): AxumPath<String>
         .unwrap_or(false);
     // Unblock a tool parked on a permission prompt; the run is going away.
     drain_pending(&s.pending_perms, &id);
-    Json(json!({"aborted": cancelled}))
+    Ok(Json(json!({"aborted": cancelled})))
 }
 
 async fn revert_session(State(s): State<AppState>, AxumPath(id): AxumPath<String>) -> ApiResult {
+    if session_for(&s, &id)?.is_none() {
+        return Err(missing(format!("session {id} not found")));
+    }
     let messages = s.db.list_messages(&id).map_err(internal)?;
     let index = messages.iter().rposition(|message| message.role == "user");
     let Some(index) = index else {
@@ -986,6 +1011,9 @@ async fn revert_session(State(s): State<AppState>, AxumPath(id): AxumPath<String
 }
 
 async fn unrevert_session(State(s): State<AppState>, AxumPath(id): AxumPath<String>) -> ApiResult {
+    if session_for(&s, &id)?.is_none() {
+        return Err(missing(format!("session {id} not found")));
+    }
     let runner = runner_for(&s);
     match runner.redo(&s.paths.project_root, &id).await {
         Ok(sha) => {
@@ -1005,7 +1033,7 @@ async fn unrevert_session(State(s): State<AppState>, AxumPath(id): AxumPath<Stri
 /// Diff between this session's first and last snapshots. Scoping to the
 /// session's shadow-git commits keeps unrelated working-tree changes out.
 async fn session_diff(State(s): State<AppState>, AxumPath(id): AxumPath<String>) -> ApiResult {
-    let Some(full) = s.db.session_full(&id).map_err(internal)? else {
+    let Some(full) = session_for(&s, &id)? else {
         return Err(missing(format!("session {id} not found")));
     };
     let snapshots = s.db.list_snapshot_rows(&id).map_err(internal)?;
@@ -1062,7 +1090,7 @@ async fn session_diff(State(s): State<AppState>, AxumPath(id): AxumPath<String>)
 }
 
 async fn session_usage(State(s): State<AppState>, AxumPath(id): AxumPath<String>) -> ApiResult {
-    if s.db.session_full(&id).map_err(internal)?.is_none() {
+    if session_for(&s, &id)?.is_none() {
         return Err(missing(format!("session {id} not found")));
     }
     let (input, output, cost) = s.db.session_usage(&id).map_err(internal)?;
@@ -1085,7 +1113,7 @@ async fn fork_session(
     AxumPath(id): AxumPath<String>,
     Json(body): Json<ForkBody>,
 ) -> ApiResult {
-    if s.db.session_full(&id).map_err(internal)?.is_none() {
+    if session_for(&s, &id)?.is_none() {
         return Err(missing(format!("session {id} not found")));
     }
     if let Some(mid) = body.message_id.as_deref() {
@@ -1378,7 +1406,7 @@ async fn post_command(
     let Some(command) = resolved else {
         return Err(missing(format!("unknown command {}", body.name)));
     };
-    if s.db.session_full(&id).map_err(internal)?.is_none() {
+    if session_for(&s, &id)?.is_none() {
         return Err(missing(format!("session {id} not found")));
     }
     let text = freedas_skill::expand_args(&command.body, &body.args);
@@ -1899,7 +1927,7 @@ async fn reply_permission(
 }
 
 async fn session_status(State(s): State<AppState>, AxumPath(id): AxumPath<String>) -> ApiResult {
-    if s.db.session_full(&id).map_err(internal)?.is_none() {
+    if session_for(&s, &id)?.is_none() {
         return Err(missing(format!("session {id} not found")));
     }
     let busy = s.aborts.lock().expect("aborts").contains_key(&id);
@@ -2060,7 +2088,7 @@ async fn sessions_status(State(s): State<AppState>) -> ApiResult {
 }
 
 async fn list_children(State(s): State<AppState>, AxumPath(id): AxumPath<String>) -> ApiResult {
-    let Some(full) = s.db.session_full(&id).map_err(internal)? else {
+    let Some(full) = session_for(&s, &id)? else {
         return Err(missing(format!("session {id} not found")));
     };
     let mut out = Vec::new();
@@ -2101,12 +2129,15 @@ async fn list_todos(State(s): State<AppState>, AxumPath(id): AxumPath<String>) -
 }
 
 async fn summarize_session(State(s): State<AppState>, AxumPath(id): AxumPath<String>) -> ApiResult {
+    if session_for(&s, &id)?.is_none() {
+        return Err(missing(format!("session {id} not found")));
+    }
     let summary = runner_for(&s).compact(&id).await.map_err(internal)?;
     Ok(Json(json!({"sessionID": id, "summary": summary})))
 }
 
 async fn init_agents_md(State(s): State<AppState>, AxumPath(id): AxumPath<String>) -> ApiResult {
-    if s.db.session_full(&id).map_err(internal)?.is_none() {
+    if session_for(&s, &id)?.is_none() {
         return Err(missing(format!("session {id} not found")));
     }
     let path = s.paths.project_root.join("AGENTS.md");
@@ -2147,7 +2178,7 @@ async fn shell_session(
     if command.trim().is_empty() {
         return Err(bad_request("command required"));
     }
-    let Some(session) = s.db.session_full(&id).map_err(internal)? else {
+    let Some(session) = session_for(&s, &id)? else {
         return Err(missing(format!("session {id} not found")));
     };
     let cfg = freedas_core::config::load(&s.paths, project_config_disabled()).unwrap_or_else(|e| {
