@@ -9,9 +9,9 @@ JSON-RPC 2.0 on stdin/stdout.
 | Method | Behavior |
 |---|---|
 | `initialize` | Advertise capabilities |
-| `session/new` | Create a session (`cwd`, `agent`, `model`) |
+| `session/new` | Create a session (`cwd`, `agent`, `model`); `agent` must be a known id or the call errors |
 | `session/load` | Resume an existing session |
-| `session/prompt` | Admit a prompt; `session/update` notifications stream text, reasoning, tool calls, and permission requests while the client waits |
+| `session/prompt` | Admit a prompt; `session/update` notifications stream text, reasoning, tool calls, and permission requests while the client waits. The response carries `finishReason`: `complete`, `permission`, or `cancelled`. One prompt per session at a time; a second is rejected while the first is in flight |
 | `session/cancel` | Cancel the current run |
 | `session/set_mode` | Switch the agent |
 | `session/set_model` | Pin a model or return to `auto` |
