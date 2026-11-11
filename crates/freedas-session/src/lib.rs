@@ -1595,33 +1595,41 @@ impl Runner {
                         )
                     } else {
                         let sub_prompt = args["prompt"].as_str().unwrap_or("");
-                        match Box::pin(self.run_task_opts(
-                            RunOpts {
-                                project_root: project_root.clone(),
-                                agent: sub_agent.to_string(),
-                                model: None,
-                                prompt: sub_prompt.to_string(),
-                                auto,
-                                manual,
-                                workspace: workspace.map(|w| w.to_string()),
-                                session_id: None,
-                                title: Some(format!("sub: {}", sub_agent)),
-                                variant: variant.clone(),
-                                depth: depth + 1,
-                                parent_id: Some(session_id.clone()),
-                                review_mode: false,
-                                progress: None,
-                                headless,
-                                mcp_disabled: mcp_disabled.clone(),
-                                approver: approver.clone(),
-                                session_rules: session_rules.clone(),
-                            },
-                            cancel.clone(),
-                        ))
-                        .await
-                        {
-                            Ok(r) => format!("subagent {sub_agent} done: {}", r.text),
-                            Err(e) => format!("subagent error: {e}"),
+                        // An unknown agent name yields no agent_def, so the
+                        // child silently runs with base config rules - the
+                        // read-only explore/general agents would become
+                        // unrestricted. Refuse instead.
+                        if !agents.iter().any(|a| a.id == sub_agent) {
+                            format!("unknown subagent: {sub_agent}")
+                        } else {
+                            match Box::pin(self.run_task_opts(
+                                RunOpts {
+                                    project_root: project_root.clone(),
+                                    agent: sub_agent.to_string(),
+                                    model: None,
+                                    prompt: sub_prompt.to_string(),
+                                    auto,
+                                    manual,
+                                    workspace: workspace.map(|w| w.to_string()),
+                                    session_id: None,
+                                    title: Some(format!("sub: {}", sub_agent)),
+                                    variant: variant.clone(),
+                                    depth: depth + 1,
+                                    parent_id: Some(session_id.clone()),
+                                    review_mode: false,
+                                    progress: None,
+                                    headless,
+                                    mcp_disabled: mcp_disabled.clone(),
+                                    approver: approver.clone(),
+                                    session_rules: session_rules.clone(),
+                                },
+                                cancel.clone(),
+                            ))
+                            .await
+                            {
+                                Ok(r) => format!("subagent {sub_agent} done: {}", r.text),
+                                Err(e) => format!("subagent error: {e}"),
+                            }
                         }
                     };
                     persist_result!(call_id, name, result_text);
