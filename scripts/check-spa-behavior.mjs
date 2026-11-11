@@ -13,55 +13,69 @@ const html = readFileSync(join(root, "crates/freedas-web/assets/index.html"), "u
 const script = html.split("<script>")[1]?.split("</script>")[0];
 if (!script) throw new Error("no inline script in index.html");
 
-const STRINGS = new Set(["textContent", "innerHTML", "value", "placeholder", "title", "type", "className", "id", "name"]);
+const STRINGS = new Set(["value", "placeholder", "title", "type", "className", "id", "name"]);
 const LISTS = new Set(["children", "options", "files"]);
-const node = () =>
-  new Proxy(
-    {
-      dataset: {},
-      style: {},
-      classList: { add() {}, remove() {}, toggle() {}, contains: () => false },
-      addEventListener() {},
-      removeEventListener() {},
-      append() {},
-      appendChild() {},
-      remove() {},
-      replaceChildren() {},
-      setAttribute() {},
-      removeAttribute() {},
-      querySelectorAll: () => [],
-      closest: () => null,
-      focus() {},
-      blur() {},
-      click() {},
-      close() {},
-      showModal() {},
-      scrollIntoView() {},
-      getBoundingClientRect: () => ({ top: 0, left: 0, width: 0, height: 0 }),
-    },
-    {
-      get(target, prop) {
-        if (prop in target) return target[prop];
-        if (typeof prop === "string" && STRINGS.has(prop)) return "";
-        if (typeof prop === "string" && LISTS.has(prop)) return [];
-        return () => undefined;
-      },
-      set() {
-        return true;
-      },
-    },
-  );
+const elements = new Map();
 
-const calls = [];
-let sources = [];
+function makeElement(id) {
+  const state = { textContent: "", innerHTML: "", hidden: false, disabled: false, open: false };
+  const base = {
+    dataset: {},
+    style: {},
+    classList: { add() {}, remove() {}, toggle() {}, contains: () => false },
+    addEventListener() {},
+    removeEventListener() {},
+    append() {},
+    appendChild() {},
+    remove() {},
+    replaceChildren() {},
+    setAttribute() {},
+    removeAttribute() {},
+    querySelectorAll: () => [],
+    closest: () => null,
+    focus() {},
+    blur() {},
+    click() {},
+    showModal() {
+      state.open = true;
+    },
+    close() {
+      state.open = false;
+    },
+    scrollIntoView() {},
+    getBoundingClientRect: () => ({ top: 0, left: 0, width: 0, height: 0 }),
+  };
+  return new Proxy(base, {
+    get(target, prop) {
+      if (prop in target) return target[prop];
+      if (typeof prop === "string" && STRINGS.has(prop)) return "";
+      if (typeof prop === "string" && LISTS.has(prop)) return [];
+      if (prop in state) return state[prop];
+      return () => undefined;
+    },
+    set(target, prop, value) {
+      if (prop in state) {
+        state[prop] = value;
+        return true;
+      }
+      return true;
+    },
+  });
+}
+
+function element(id) {
+  if (!elements.has(id)) elements.set(id, makeElement(id));
+  return elements.get(id);
+}
+
 globalThis.document = {
-  getElementById: () => node(),
-  createElement: () => node(),
+  getElementById: element,
+  createElement: () => makeElement("created"),
   querySelectorAll: () => [],
   addEventListener() {},
   title: "",
-  body: node(),
-  documentElement: node(),
+  body: makeElement("body"),
+  documentElement: makeElement("html"),
 };
 globalThis.window = {
   addEventListener() {},
@@ -71,8 +85,10 @@ globalThis.window = {
 };
 globalThis.location = { hash: "#/", pathname: "/" };
 globalThis.localStorage = globalThis.window.localStorage;
-globalThis.fetch = async (url) => {
-  calls.push(String(url));
+
+const calls = [];
+globalThis.fetch = async (url, options = {}) => {
+  calls.push({ url: String(url), method: options.method || "GET", body: options.body });
   return {
     ok: true,
     status: 200,
@@ -81,10 +97,12 @@ globalThis.fetch = async (url) => {
     text: async () => "",
   };
 };
+
+let source = null;
 globalThis.EventSource = class {
   constructor(url) {
     this.url = url;
-    sources.push(this);
+    source = this;
   }
   close() {}
   addEventListener() {}
@@ -95,22 +113,60 @@ new Function(`${script}\nglobalThis.__spa = { connect, state, resyncSession };`)
 const { connect, state } = globalThis.__spa;
 state.hasEvents = true;
 connect();
-const es = sources[0];
-if (!es) throw new Error("the SPA never opened an event stream");
-if (typeof es.onmessage !== "function") throw new Error("the SPA set no message handler");
+if (!source) throw new Error("the SPA never opened an event stream");
+if (typeof source.onmessage !== "function") throw new Error("the SPA set no message handler");
 
-const before = calls.length;
-await es.onmessage({ data: JSON.stringify({ type: "server.lagged" }) });
-const after = calls.slice(before);
-if (!after.some((url) => url.includes("/session"))) {
-  throw new Error(`a lagged event must refetch the session list, got ${JSON.stringify(after)}`);
+function urlsSince(mark) {
+  return calls.slice(mark).map((call) => call.url);
 }
 
-const beforeGap = calls.length;
-await es.onmessage({ data: JSON.stringify({ type: "server.gap" }) });
-const afterGap = calls.slice(beforeGap);
-if (!afterGap.some((url) => url.includes("/session"))) {
-  throw new Error(`a gap event must refetch the session list, got ${JSON.stringify(afterGap)}`);
+// A dropped event must send the client back to the server.
+for (const type of ["server.lagged", "server.gap"]) {
+  const mark = calls.length;
+  await source.onmessage({ data: JSON.stringify({ type, dropped: 3 }) });
+  const urls = urlsSince(mark);
+  if (!urls.some((url) => url.includes("/session"))) {
+    throw new Error(`a ${type} event must refetch the session list, got ${JSON.stringify(urls)}`);
+  }
 }
 
-console.log(`SPA event handling OK (${after.length + afterGap.length} refetches)`);
+// Streamed text lands in the live area.
+state.current = "ses_1";
+await source.onmessage({
+  data: JSON.stringify({
+    type: "message.part.delta",
+    sessionID: "ses_1",
+    text: "hello world",
+  }),
+});
+if (!element("live-text").textContent.includes("hello world")) {
+  throw new Error(`the delta did not reach the transcript: ${element("live-text").textContent}`);
+}
+
+// A permission ask opens the modal with what the tool wants.
+await source.onmessage({
+  data: JSON.stringify({
+    type: "permission.asked",
+    sessionID: "ses_1",
+    permissionID: "perm_1",
+    action: "bash",
+    resource: "git push",
+  }),
+});
+const body = element("perm-body").textContent;
+if (!body.includes("bash") || !body.includes("git push")) {
+  throw new Error(`the permission modal does not name the ask: ${body}`);
+}
+if (!element("perm-dialog").open) {
+  throw new Error("the permission modal did not open");
+}
+
+// The answer closes it again.
+await source.onmessage({
+  data: JSON.stringify({ type: "permission.replied", sessionID: "ses_1", permissionID: "perm_1" }),
+});
+if (element("perm-dialog").open) {
+  throw new Error("the permission modal stayed open after the reply");
+}
+
+console.log("SPA event handling OK");
