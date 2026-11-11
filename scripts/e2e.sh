@@ -95,6 +95,7 @@ check "import ok"           "$BIN import /tmp/fexp.json 2>/dev/null | grep -q 'i
 check "session list"        "$BIN session list | grep -q '$SID'"
 check "session rename"      "$BIN session rename '$SID' renamed-e2e >/dev/null 2>&1 && $BIN session list | grep -q renamed-e2e"
 check "agent list"          "$BIN agent list | grep -q build"
+check "bad agent refused"   "$BIN run 'hi' --agent nosuchagent --format json 2>&1 | grep -qi 'unknown agent'"
 check "skill list runs"     "$BIN skill list >/dev/null 2>&1"
 check "stats runs"          "$BIN stats >/dev/null 2>&1"
 check "providers list"      "$BIN providers list >/dev/null 2>&1"
