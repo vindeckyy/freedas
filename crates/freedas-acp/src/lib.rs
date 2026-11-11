@@ -331,10 +331,43 @@ impl AcpServer {
         if !self.sessions.contains_key(session_id) {
             match self.db.session_context(session_id) {
                 Ok(Some((root, agent))) => {
+                    // The stored root came from a previous session/new check,
+                    // but sessions also exist from the local CLI in other
+                    // projects - re-validate so load cannot escape the
+                    // workspace roots session/new enforces.
+                    let cwd = match PathBuf::from(root).canonicalize() {
+                        Ok(cwd) => cwd,
+                        Err(error) => {
+                            return vec![rpc_error(id, -32602, format!("session cwd: {error}"))];
+                        }
+                    };
+                    let any_cwd =
+                        std::env::var("FREEDAS_ACP_ALLOW_ANY_CWD").is_ok_and(|v| v == "1");
+                    if !any_cwd && !self.allowed_roots.iter().any(|r| cwd.starts_with(r)) {
+                        return vec![rpc_error(
+                            id,
+                            -32602,
+                            "session cwd is outside the allowed workspace roots".to_string(),
+                        )];
+                    }
+                    // The stored agent may predate this process's trust state
+                    // or a custom-agent removal; re-check like session/new.
+                    let trust = freedas_core::config::load(
+                        &freedas_core::paths::Paths::resolve(cwd.clone()),
+                        false,
+                    )
+                    .map(|c| c.trust_project_code)
+                    .unwrap_or(false);
+                    if !freedas_agent::merged_agents(&cwd, trust)
+                        .iter()
+                        .any(|a| a.id == agent)
+                    {
+                        return vec![rpc_error(id, -32602, format!("unknown agent: {agent}"))];
+                    }
                     self.sessions.insert(
                         session_id.to_string(),
                         Session {
-                            cwd: PathBuf::from(root),
+                            cwd,
                             agent,
                             ..Session::fallback()
                         },
@@ -1770,6 +1803,8 @@ mod tests {
             .create_session(&project_id, "plan", "stored", None)
             .unwrap();
         let mut server = AcpServer::new(db);
+        // session/load re-validates cwd against allowed_roots like session/new.
+        server.allowed_roots.push(dir.canonicalize().unwrap());
         let out = call(
             &mut server,
             "session/load",
