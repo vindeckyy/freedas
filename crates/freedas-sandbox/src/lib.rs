@@ -53,26 +53,42 @@ pub fn status() -> String {
 fn bwrap_works() -> bool {
     static OK: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *OK.get_or_init(|| {
-        which("bwrap")
-            .map(|b| {
-                std::process::Command::new(b)
-                    .args([
-                        "--die-with-parent",
-                        "--unshare-all",
-                        "--ro-bind",
-                        "/",
-                        "/",
-                        "--",
-                        "/bin/true",
-                    ])
-                    .stdin(std::process::Stdio::null())
-                    .stdout(std::process::Stdio::null())
-                    .stderr(std::process::Stdio::null())
-                    .status()
-                    .map(|s| s.success())
-                    .unwrap_or(false)
-            })
-            .unwrap_or(false)
+        let Some(bwrap) = which("bwrap") else {
+            return false;
+        };
+        let mut child = match std::process::Command::new(bwrap)
+            .args([
+                "--die-with-parent",
+                "--unshare-all",
+                "--ro-bind",
+                "/",
+                "/",
+                "--",
+                "/bin/true",
+            ])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+        {
+            Ok(c) => c,
+            Err(_) => return false,
+        };
+        // A wedged namespace setup must not hang session start.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+        loop {
+            match child.try_wait() {
+                Ok(Some(s)) => return s.success(),
+                Ok(None) if std::time::Instant::now() < deadline => {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                Ok(None) => {
+                    let _ = child.kill();
+                    return false;
+                }
+                Err(_) => return false,
+            }
+        }
     })
 }
 

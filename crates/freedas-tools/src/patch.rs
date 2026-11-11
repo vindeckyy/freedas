@@ -279,11 +279,21 @@ async fn apply_via_patch_bin(
     // already refused to upgrade `ask` when no backend exists, so the direct
     // fallback below runs only after an explicit approval.
     let wrap = |args: &[String]| -> Result<Vec<String>> {
-        let off = !ctx.sandbox
-            || std::env::var("FREEDAS_EXPERIMENTAL_SANDBOX")
-                .map(|v| v == "false" || v == "0")
-                .unwrap_or(false);
-        if off {
+        let opted_out = std::env::var("FREEDAS_EXPERIMENTAL_SANDBOX")
+            .map(|v| v == "false" || v == "0")
+            .unwrap_or(false);
+        if !ctx.sandbox || opted_out {
+            // `!ctx.sandbox` while sandboxing was configured means no working
+            // backend; refuse headless rather than run bare.
+            if !ctx.sandbox
+                && !opted_out
+                && ctx.config.sandbox.mode != "off"
+                && ctx.approver.is_none()
+            {
+                return Err(FreedasError::SandboxUnavailable(
+                    "no sandbox backend; refusing to run external patch unsandboxed".into(),
+                ));
+            }
             return Ok(args.to_vec());
         }
         let root = ctx.project_root.clone();
@@ -730,7 +740,11 @@ mod tests {
             session_id: "ses_1".into(),
             project_root: root.to_path_buf(),
             cwd: root.to_path_buf(),
-            config: freedas_core::config::Config::default(),
+            config: {
+                let mut c = freedas_core::config::Config::default();
+                c.sandbox.mode = "off".into();
+                c
+            },
             agent_rules: vec![],
             auto: true,
             manual: false,

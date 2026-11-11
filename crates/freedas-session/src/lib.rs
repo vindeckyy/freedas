@@ -1382,12 +1382,17 @@ impl Runner {
                         // Gate commands are repo-controlled; unsandboxed
                         // execution needs an explicit opt-in (mode=on) or an
                         // interactive approver — never run them silently in
-                        // a headless run.
+                        // a headless run. The env opt-out relaxes this the
+                        // same way it does the bash tool.
+                        let sandbox_opted_out = std::env::var("FREEDAS_EXPERIMENTAL_SANDBOX")
+                            .map(|v| v == "false" || v == "0")
+                            .unwrap_or(false);
                         let gate = freedas_standards::run_gate_cancellable(
                             &project_root,
                             &commands,
                             &cancel,
-                            self.config.sandbox.mode == "on" || approver.is_none(),
+                            self.config.sandbox.mode == "on"
+                                || (approver.is_none() && !sandbox_opted_out),
                         )
                         .await;
                         for plugin in &plugins {
