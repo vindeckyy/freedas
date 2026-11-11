@@ -451,18 +451,23 @@ async fn chat_completions(
     ))
 }
 
-/// Embedding input price. `shortcut: priced at the text-embedding-3-small rate
-/// because the catalog has no embedding entries; add embedding models to the
-/// catalog when per-model prices matter.`
-const EMBEDDING_INPUT_COST_PER_MTOK: f64 = 0.02;
-
-/// Embedding models the flat rate prices; unknown names are rejected like
-/// chat rejects non-catalog models.
-const EMBEDDING_MODELS: &[&str] = &[
-    "text-embedding-3-small",
-    "text-embedding-3-large",
-    "text-embedding-ada-002",
+/// Embedding input price per million tokens, per model (OpenAI list prices).
+/// Kept here because the catalog has no embedding entries.
+const EMBEDDING_PRICES: &[(&str, f64)] = &[
+    ("text-embedding-3-small", 0.02),
+    ("text-embedding-3-large", 0.13),
+    ("text-embedding-ada-002", 0.10),
 ];
+
+/// Input price per million tokens for a request model, with or without the
+/// `openai/` prefix.
+fn embedding_price(model: &str) -> Option<f64> {
+    let bare = model.strip_prefix("openai/").unwrap_or(model);
+    EMBEDDING_PRICES
+        .iter()
+        .find(|(m, _)| *m == bare)
+        .map(|(_, p)| *p)
+}
 
 async fn embeddings(
     State(state): State<AppState>,
@@ -485,12 +490,9 @@ async fn embeddings(
     if model.is_empty() {
         return Err(bad_request("model is required"));
     }
-    // Embeddings is flat-priced, so it cannot meter arbitrary model names the
-    // way catalog-priced chat can; only known embedding models pass.
-    if !EMBEDDING_MODELS
-        .iter()
-        .any(|m| model == *m || model == format!("openai/{m}"))
-    {
+    // Embeddings is priced from a fixed table, so it cannot meter arbitrary
+    // model names the way catalog-priced chat can; only known models pass.
+    if embedding_price(&model).is_none() {
         return Err(bad_request(&format!("unknown embedding model: {model}")));
     }
     let provider = provider_of(&model).to_owned();
@@ -500,7 +502,7 @@ async fn embeddings(
         )));
     }
     let input_tokens = estimate_embedding_tokens(&request);
-    let estimated_cost = embedding_cost(input_tokens);
+    let estimated_cost = embedding_cost(&model, input_tokens);
     let reservation = reserve_for(&state, &auth, estimated_cost).await?;
     let forward_body = serde_json::to_vec(&request).map_err(|_| bad_request("invalid body"))?;
     let upstream = match send(&state, &provider, forward_body, "/embeddings").await {
@@ -528,7 +530,7 @@ async fn embeddings(
         &state,
         &auth,
         None,
-        Pricing::Embedding,
+        Pricing::Embedding(model.clone()),
         &model,
         input_tokens,
         reservation,
@@ -713,8 +715,11 @@ fn usage_cost(model: &ModelInfo, usage: Usage) -> f64 {
     (cost * 1e6).round() / 1e6
 }
 
-fn embedding_cost(input_tokens: u64) -> f64 {
-    (input_tokens as f64 / 1e6 * EMBEDDING_INPUT_COST_PER_MTOK * 1e6).round() / 1e6
+/// Cost of an embedding request. `model` is validated against
+/// `EMBEDDING_PRICES` before metering, so an unknown name prices at 0.
+fn embedding_cost(model: &str, input_tokens: u64) -> f64 {
+    let price = embedding_price(model).unwrap_or_default();
+    (input_tokens as f64 / 1e6 * price * 1e6).round() / 1e6
 }
 
 fn request_max_tokens(request: &Value) -> Option<u64> {
@@ -761,14 +766,14 @@ fn output_estimate(body: &Value) -> u64 {
 #[derive(Debug, Clone)]
 enum Pricing {
     Model(ModelInfo),
-    Embedding,
+    Embedding(String),
 }
 
 impl Pricing {
     fn cost(&self, usage: Usage) -> f64 {
         match self {
             Pricing::Model(model) => usage_cost(model, usage),
-            Pricing::Embedding => embedding_cost(usage.input_tokens),
+            Pricing::Embedding(model) => embedding_cost(model, usage.input_tokens),
         }
     }
 }
@@ -1890,5 +1895,16 @@ mod tests {
         let usage = tap.usage(20);
         assert_eq!(usage.input_tokens, 20);
         assert_eq!(usage.output_tokens, 2);
+    }
+
+    #[test]
+    fn embedding_cost_is_per_model() {
+        let small = embedding_cost("text-embedding-3-small", 1_000_000);
+        let large = embedding_cost("text-embedding-3-large", 1_000_000);
+        let ada = embedding_cost("openai/text-embedding-ada-002", 1_000_000);
+        assert_eq!(small, 0.02);
+        assert_eq!(large, 0.13);
+        assert_eq!(ada, 0.10);
+        assert_eq!(embedding_cost("no-such-model", 1_000_000), 0.0);
     }
 }
