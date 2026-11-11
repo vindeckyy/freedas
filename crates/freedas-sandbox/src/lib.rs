@@ -43,7 +43,9 @@ pub fn available() -> bool {
 }
 
 pub fn status() -> String {
-    if which("sandbox-exec").is_some() {
+    if opted_out() {
+        "disabled (FREEDAS_EXPERIMENTAL_SANDBOX)".into()
+    } else if which("sandbox-exec").is_some() {
         "sandbox-exec".into()
     } else if bwrap_works() {
         "bubblewrap".into()
