@@ -2637,14 +2637,27 @@ async fn attach_run(opts: AttachRun) -> Result<i32, Box<dyn std::error::Error>> 
         }
     }
     // The prompt POST returns as soon as the run is accepted; a failure here
-    // means the server never started it.
-    match tokio::time::timeout(std::time::Duration::from_secs(30), prompt_task).await {
-        Ok(Ok(Ok(_))) => {}
-        Ok(Ok(Err(e))) => {
-            return Err(format!("attach: prompt failed: {}", scrub_url(&e, &base)).into());
+    // means the server never started it. JSON mode still ends the stream with
+    // session.error so consumers don't mistake a dead prompt for a truncated pipe.
+    let prompt_error =
+        match tokio::time::timeout(std::time::Duration::from_secs(30), prompt_task).await {
+            Ok(Ok(Ok(_))) => None,
+            Ok(Ok(Err(e))) => Some(format!("attach: prompt failed: {}", scrub_url(&e, &base))),
+            Ok(Err(e)) => Some(format!("attach: prompt task failed: {e}")),
+            Err(_) => Some("attach: prompt request did not complete".to_string()),
+        };
+    if let Some(message) = prompt_error {
+        if json_mode {
+            println!(
+                "{}",
+                serde_json::json!({
+                    "type": "session.error",
+                    "sessionID": session_id,
+                    "error": message,
+                })
+            );
         }
-        Ok(Err(e)) => return Err(format!("attach: prompt task failed: {e}").into()),
-        Err(_) => return Err("attach: prompt request did not complete".into()),
+        return Err(message.into());
     }
     if !json_mode {
         if streamed.is_empty() && !final_text.is_empty() {
