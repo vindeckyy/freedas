@@ -340,10 +340,20 @@ pub async fn run(cli: Cli, project_root: PathBuf) -> Result<i32, Box<dyn std::er
                         progress: if format == "json" {
                             let sid = session_id.clone().unwrap_or_default();
                             Some(std::sync::Arc::new(move |msg: String| {
-                                // \u{2} payloads are tool results; forward them
-                                // so headless consumers see tool failures as
-                                // they happen instead of only in the summary.
-                                if let Some(json) = msg.strip_prefix('\u{2}')
+                                // \u{1} markers name the running tool or gate;
+                                // \u{2} payloads are tool results. Forward both
+                                // so headless consumers see activity and
+                                // failures as they happen, not only the summary.
+                                if let Some(marker) = msg.strip_prefix('\u{1}') {
+                                    println!(
+                                        "{}",
+                                        serde_json::json!({
+                                            "type": "session.marker",
+                                            "sessionID": sid,
+                                            "marker": marker,
+                                        })
+                                    );
+                                } else if let Some(json) = msg.strip_prefix('\u{2}')
                                     && let Ok(mut v) =
                                         serde_json::from_str::<serde_json::Value>(json)
                                 {
