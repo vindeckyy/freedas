@@ -51,6 +51,8 @@ done
 OUT=$(PATH="$PWD/fakepath" $BIN run "RUN:touch unsandboxed-marker" --auto --format json 2>"$D/nosandbox.err")
 check "refuses unsandboxed" "echo '$OUT' | grep -qi 'sandbox backend'"
 check "marker not written"  "test ! -e unsandboxed-marker"
+PATH="$PWD/fakepath" FREEDAS_EXPERIMENTAL_SANDBOX=false $BIN run "RUN:touch opted-out-marker" --auto --format json >/dev/null 2>&1
+check "opt-out runs direct" "test -e opted-out-marker"
 
 echo "== 4. plan mode =="
 cd "$D"
