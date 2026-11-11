@@ -136,7 +136,7 @@ pub fn strictness_allows(strictness: &str, severity: &str, confidence: u8) -> bo
 /// lands on a line the diff actually touched.
 pub async fn run_local_review(
     project_root: &Path,
-    model_fn: impl Fn(&str) -> String,
+    model_fn: impl Fn(&str) -> String + Send + 'static,
 ) -> ReviewResult {
     run_local_review_target(project_root, None, model_fn).await
 }
@@ -150,7 +150,7 @@ pub async fn run_local_review(
 pub async fn run_local_review_target(
     project_root: &Path,
     target: Option<&str>,
-    model_fn: impl Fn(&str) -> String,
+    model_fn: impl Fn(&str) -> String + Send + 'static,
 ) -> ReviewResult {
     match run_review(project_root, target, None, model_fn).await {
         Ok(result) => result,
@@ -188,7 +188,7 @@ pub async fn run_worker_review_target(
     repo: &str,
     token: Option<&str>,
     head_sha: Option<&str>,
-    model_fn: impl Fn(&str) -> String,
+    model_fn: impl Fn(&str) -> String + Send + 'static,
 ) -> Result<ReviewResult, String> {
     run_review(
         project_root,
@@ -208,7 +208,7 @@ async fn run_review(
     project_root: &Path,
     target: Option<&str>,
     job: Option<ReviewJob<'_>>,
-    model_fn: impl Fn(&str) -> String,
+    model_fn: impl Fn(&str) -> String + Send + 'static,
 ) -> Result<ReviewResult, String> {
     let pin = job.as_ref().and_then(|job| job.head_sha);
     let token = job.as_ref().and_then(|job| job.token);
@@ -221,7 +221,12 @@ async fn run_review(
     };
     let prompt = review_prompt(&diff, &extra);
     let ranges = diff_ranges(&diff);
-    let Some(parsed) = parse_findings(&model_fn(&prompt)) else {
+    // The model call blocks; run it on the blocking pool so worker tasks do
+    // not park a runtime thread for the whole request.
+    let reply = tokio::task::spawn_blocking(move || model_fn(&prompt))
+        .await
+        .map_err(|e| format!("review model task failed: {e}"))?;
+    let Some(parsed) = parse_findings(&reply) else {
         return Err("review model reply was not valid findings JSON".into());
     };
     let findings: Vec<Finding> = parsed
@@ -1620,6 +1625,7 @@ async fn review(
         return Err("review model is not configured (FREEDAS_GATEWAY_URL)".into());
     };
     let model = ReviewModel::new(gateway.to_owned());
+    let errors = model.error.clone();
     let target = pr_number.map(|number| number.to_string());
     let result = run_worker_review_target(
         &root,
@@ -1628,10 +1634,10 @@ async fn review(
         repo,
         token,
         head_sha,
-        |prompt| model.message(prompt),
+        move |prompt| model.message(prompt),
     )
     .await;
-    if let Some(error) = model.error() {
+    if let Some(error) = errors.lock().expect("review error lock").take() {
         return Err(error);
     }
     result
@@ -1664,8 +1670,7 @@ const REVIEW_FORMAT: &str = "Respond with only a JSON array of findings: [{\"fil
 const REVIEW_SYSTEM: &str = "You review code changes and return JSON findings.";
 
 struct ReviewModel {
-    // shortcut: blocks the runtime thread during the model call; move review
-    // onto an async model call if worker concurrency starts to matter.
+    // Blocking reqwest is fine: callers reach `message` via `spawn_blocking`.
     client: reqwest::blocking::Client,
     url: String,
     token: Option<String>,
@@ -2084,7 +2089,7 @@ mod tests {
         })
         .to_string();
 
-        let result = run_local_review(root, |_| response.clone()).await;
+        let result = run_local_review(root, move |_| response.clone()).await;
         assert_eq!(result.findings.len(), 1);
         assert_eq!(result.findings[0].file, "app.rs");
         assert_eq!(result.findings[0].line, 2);
@@ -2127,7 +2132,8 @@ mod tests {
         let root = dir.path();
         let (_, second) = two_commit_repo(root);
         for reply in ["", "Looks good to me", r#"{"summary":"clean"}"#] {
-            let result = run_local_review_target(root, Some(&second), |_| reply.to_string()).await;
+            let result =
+                run_local_review_target(root, Some(&second), move |_| reply.to_string()).await;
             assert!(result.findings.is_empty());
             assert!(
                 result.summary.contains("not valid findings JSON"),
@@ -2198,14 +2204,19 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
         let (_, second) = two_commit_repo(root);
-        let seen = std::cell::RefCell::new(String::new());
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+        let seen2 = seen.clone();
         let response = finding_json("app.rs", 2);
-        let result = run_local_review_target(root, Some(&second), |diff| {
-            *seen.borrow_mut() = diff.to_string();
+        let result = run_local_review_target(root, Some(&second), move |diff| {
+            *seen2.lock().unwrap() = diff.to_string();
             response.clone()
         })
         .await;
-        assert!(seen.borrow().contains("let unused"), "{}", seen.borrow());
+        assert!(
+            seen.lock().unwrap().contains("let unused"),
+            "{}",
+            seen.lock().unwrap()
+        );
         assert_eq!(result.findings.len(), 1);
         assert_eq!(result.findings[0].line, 2);
     }
@@ -2216,14 +2227,19 @@ mod tests {
         let root = dir.path();
         let (first, _) = two_commit_repo(root);
         git(root, &["branch", "base", &first]);
-        let seen = std::cell::RefCell::new(String::new());
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+        let seen2 = seen.clone();
         let response = finding_json("app.rs", 2);
-        let result = run_local_review_target(root, Some("base"), |diff| {
-            *seen.borrow_mut() = diff.to_string();
+        let result = run_local_review_target(root, Some("base"), move |diff| {
+            *seen2.lock().unwrap() = diff.to_string();
             response.clone()
         })
         .await;
-        assert!(seen.borrow().contains("let unused"), "{}", seen.borrow());
+        assert!(
+            seen.lock().unwrap().contains("let unused"),
+            "{}",
+            seen.lock().unwrap()
+        );
         assert_eq!(result.findings.len(), 1);
     }
 
@@ -2233,17 +2249,18 @@ mod tests {
         let root = dir.path();
         two_commit_repo(root);
         std::fs::write(root.join("fresh.rs"), "fn a() {}\nfn b() {}\n").unwrap();
-        let seen = std::cell::RefCell::new(String::new());
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+        let seen2 = seen.clone();
         let response = finding_json("fresh.rs", 2);
-        let result = run_local_review_target(root, None, |diff| {
-            *seen.borrow_mut() = diff.to_string();
+        let result = run_local_review_target(root, None, move |diff| {
+            *seen2.lock().unwrap() = diff.to_string();
             response.clone()
         })
         .await;
         assert!(
-            seen.borrow().contains("+++ b/fresh.rs"),
+            seen.lock().unwrap().contains("+++ b/fresh.rs"),
             "{}",
-            seen.borrow()
+            seen.lock().unwrap()
         );
         assert_eq!(result.findings.len(), 1);
 
