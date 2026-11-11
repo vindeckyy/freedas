@@ -538,6 +538,15 @@ fn spawn_prompt(
     });
     // A dedicated thread keeps the blocking approver off the relay runtime.
     std::thread::spawn(move || {
+        // Dropped on every exit path - success, bail, or panic - so the remote
+        // client always sees a terminal event and the cancel slot is freed.
+        let guard = RunGuard {
+            cancels: cancels.clone(),
+            sender: sender.clone(),
+            seqs: seqs.clone(),
+            session_id: session_id.clone(),
+            settled: std::sync::atomic::AtomicBool::new(false),
+        };
         let Ok(runtime) = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -642,19 +651,52 @@ fn spawn_prompt(
             };
             let _ = send_event(&sender, &seqs, &session_id, event);
             // The SSE server always follows the terminal event with
-            // session.idle; dashboards key off it to end the busy state.
-            let _ = send_event(
-                &sender,
-                &seqs,
-                &session_id,
-                json!({
-                    "type": "session.idle",
-                    "sessionID": session_id,
-                }),
-            );
-            cancels.lock().expect("cancels").remove(&session_id);
+            // session.idle; the guard emits it (plus session.error first, had
+            // the run unwound) and frees the cancel slot.
+            guard
+                .settled
+                .store(true, std::sync::atomic::Ordering::Relaxed);
         });
     });
+}
+
+/// Owns a relayed run's bookkeeping; dropped when the worker thread finishes
+/// *or unwinds*, so remote clients never hang on a bare EOF.
+struct RunGuard {
+    cancels: Arc<Mutex<HashMap<String, CancellationToken>>>,
+    sender: mpsc::Sender<RelayFrame>,
+    seqs: Arc<Mutex<HashMap<String, u64>>>,
+    session_id: String,
+    settled: std::sync::atomic::AtomicBool,
+}
+
+impl Drop for RunGuard {
+    fn drop(&mut self) {
+        if !self.settled.load(std::sync::atomic::Ordering::Relaxed) {
+            let _ = send_event(
+                &self.sender,
+                &self.seqs,
+                &self.session_id,
+                json!({
+                    "type": "session.error",
+                    "sessionID": self.session_id,
+                    "error": "run aborted unexpectedly",
+                }),
+            );
+        }
+        let _ = send_event(
+            &self.sender,
+            &self.seqs,
+            &self.session_id,
+            json!({
+                "type": "session.idle",
+                "sessionID": self.session_id,
+            }),
+        );
+        if let Ok(mut cancels) = self.cancels.lock() {
+            cancels.remove(&self.session_id);
+        }
+    }
 }
 
 fn session_root(db_path: &Path, session_id: &str) -> Option<std::path::PathBuf> {
