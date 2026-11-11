@@ -24,17 +24,19 @@ Freedas is one Rust workspace (31 crates) with one client binary plus optional s
 
 If you know Codex, Cursor, or Devin, the shape will feel familiar. The difference is where the state lives: on your disk, in a schema you can read, behind commands you can script.
 
-## Performance
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/benchmarks-launch-dark-v7.png">
+  <source media="(prefers-color-scheme: light)" srcset="docs/benchmarks-launch-light-v7.png">
+  <img alt="Freedas launch benchmarks: spawn time, ready-to-type, and warm launch" src="docs/benchmarks-launch-light-v7.png">
+</picture>
 
-Self-measured on the release build (one machine, medians; your numbers will vary):
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/benchmarks-footprint-dark-v7.png">
+  <source media="(prefers-color-scheme: light)" srcset="docs/benchmarks-footprint-light-v7.png">
+  <img alt="Freedas footprint benchmarks: idle memory, disk footprint, and per-prompt overhead" src="docs/benchmarks-footprint-light-v7.png">
+</picture>
 
-- Process spawn (`--version` / `--help`): ~2.3 ms
-- Launch to ready-to-type: ~14 ms
-- Idle memory while waiting for input: ~15 MB RSS
-- Install size: ~16 MB, a single stripped binary with no bundled runtime
-- A trivial prompt sends ~1.4k input tokens including 17 tool schemas
-
-Reproduce with `freedas bench run` (see [the CLI reference](docs/src/cli.md#freedas-bench-run)) or measure spawn time yourself with `time freedas --version`.
+External launch numbers come from [agentty.org](https://agentty.org/benchmarks/), [ovm.sh](https://ovm.sh/benchmark), [graphwiz.ai](https://graphwiz.ai/), the Forcefield launch benchmark, and the crewshal TTFT harness-overhead study. Token efficiency comes from the orbi.build comparison. We measured Freedas numbers on the release build on one machine, so read margins as directional. The chart sources live in `scripts/gen_benchmarks.py` and `docs/benchmarks-*-v7.svg`.
 
 ## Install in one minute
 

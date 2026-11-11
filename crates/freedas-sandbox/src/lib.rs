@@ -32,17 +32,48 @@ const SYSTEM_READ_PATHS: &[&str] = &[
 ];
 
 pub fn available() -> bool {
-    which("sandbox-exec").is_some() || which("bwrap").is_some()
+    which("sandbox-exec").is_some() || bwrap_works()
 }
 
 pub fn status() -> String {
     if which("sandbox-exec").is_some() {
         "sandbox-exec".into()
-    } else if which("bwrap").is_some() {
+    } else if bwrap_works() {
         "bubblewrap".into()
     } else {
         "unavailable".into()
     }
+}
+
+/// bwrap can be installed yet unable to sandbox: kernels with unprivileged
+/// user namespaces disabled, AppArmor restrictions, or containers without
+/// CAP_NET_ADMIN reject the namespace setup at run time. Probe once per
+/// process so "installed but denied" reports as unavailable, which lets
+/// callers apply their fail-closed or best-effort path correctly.
+fn bwrap_works() -> bool {
+    static OK: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *OK.get_or_init(|| {
+        which("bwrap")
+            .map(|b| {
+                std::process::Command::new(b)
+                    .args([
+                        "--die-with-parent",
+                        "--unshare-all",
+                        "--ro-bind",
+                        "/",
+                        "/",
+                        "--",
+                        "/bin/true",
+                    ])
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .status()
+                    .map(|s| s.success())
+                    .unwrap_or(false)
+            })
+            .unwrap_or(false)
+    })
 }
 
 /// Only an executable regular file counts; a directory named like the tool
@@ -253,7 +284,7 @@ pub fn wrap_command(policy: &SandboxPolicy, program: &str, args: &[&str]) -> Opt
         ];
         out.extend(args.iter().map(|a| a.to_string()));
         Some(out)
-    } else if which("bwrap").is_some() {
+    } else if bwrap_works() {
         Some(bwrap_command(policy, program, args))
     } else {
         None
