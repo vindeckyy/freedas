@@ -90,7 +90,7 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
       # The control-plane tests need a real database. They share one, so they
       # run one at a time: one of them drops the auth tables.
-      - run: cargo test --locked -p freedas-control -- --ignored --test-threads=1
+      - run: cargo test --locked -p freedas-control -- --include-ignored --test-threads=1
 
   e2e:
     name: e2e (${{ matrix.os }})

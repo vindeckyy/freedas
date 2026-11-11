@@ -40,7 +40,7 @@ The control-plane tests need a real PostgreSQL and are skipped without one:
 ```sh
 FREEDAS_PG_URL=postgres://postgres:postgres@127.0.0.1:5432/postgres \
 DATABASE_URL=$FREEDAS_PG_URL \
-  cargo test -p freedas-control -- --ignored --test-threads=1
+  cargo test -p freedas-control -- --include-ignored --test-threads=1
 ```
 
 They share one database and one of them drops the auth tables, so they run

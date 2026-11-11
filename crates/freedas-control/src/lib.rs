@@ -2060,7 +2060,8 @@ async fn list_sandboxes(State(state): State<AppState>, headers: HeaderMap) -> Ap
             String,
             String,
             String,
-            String,
+            // A sandbox that has not branched yet has no branch name.
+            Option<String>,
             i64,
             i64,
             Option<i64>,
@@ -2235,7 +2236,8 @@ async fn get_sandbox(
             String,
             String,
             String,
-            String,
+            // A sandbox that has not branched yet has no branch name.
+            Option<String>,
             i64,
             i64,
             Option<i64>,
@@ -7227,6 +7229,14 @@ VYzfNgnqS52tKDQJ3zToKgMz
             assert_eq!(status, 404, "{body}");
         }
 
+        // With the repository enabled again, the missing App configuration is
+        // the only thing left that can stop the listing.
+        sqlx::query("UPDATE github_repositories SET enabled = TRUE WHERE installation_id = $1 AND repo = $2")
+            .bind(installation)
+            .bind(&repo)
+            .execute(&pool)
+            .await
+            .unwrap();
         let path = format!("/github/pulls?repo={repo}&state=open");
         let (status, body) = call(&app, "GET", &path, &token, None).await;
         assert_eq!(status, 501, "{body}");
