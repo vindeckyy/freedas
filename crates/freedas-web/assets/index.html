@@ -1303,6 +1303,16 @@ function connect() {
     let event;
     try { event = JSON.parse(msg.data); } catch { return; }
     if (event.type === "server.connected") { setConn("live"); return; }
+    // The server tells the client when it dropped events: the broadcast lagged
+    // or the replay window moved past what this client had. Refetch what the
+    // server can report instead of showing a transcript that silently lost a
+    // turn. Neither event carries a session id, so handle it before the
+    // session filter drops it.
+    if (event.type === "server.gap" || event.type === "server.lagged") {
+      banner("note", "Some events were missed; refreshing the view.");
+      await resyncSession();
+      return;
+    }
     // Permission asks are session-agnostic: a parked run on a session you are
     // not viewing still needs an answer or it stalls for the 10-minute
     // timeout. Handle them before the sessionID filter drops them.

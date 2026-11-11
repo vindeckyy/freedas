@@ -18,3 +18,4 @@ if [ ! -s "$tmp/spa.js" ]; then
 fi
 node --check "$tmp/spa.js"
 echo "SPA script parses ($(wc -l < "$tmp/spa.js" | tr -d ' ') lines)"
+node "$root/scripts/check-spa-behavior.mjs"

@@ -46,3 +46,8 @@ the same JSON and SSE API, with the same routes and behavior.
 The SPA never talks to providers directly; every model call goes through the
 server. On the control plane it is served at `/`, `/me`, and `/org/<slug>`
 and routes by hash.
+
+When the server drops events - the broadcast lagged, or the replay window
+moved past what the page had - it says so with `server.lagged` or
+`server.gap`. The page then refetches the transcript instead of showing a
+stream that silently lost a turn.
