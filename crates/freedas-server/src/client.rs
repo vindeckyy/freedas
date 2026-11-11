@@ -34,7 +34,16 @@ pub async fn request(
     }
     let resp = req.send().await.map_err(|e| e.to_string())?;
     if !resp.status().is_success() {
-        return Err(format!("http {}", resp.status()));
+        let status = resp.status();
+        // The server answers {"error": "..."}; keep it — a bare code tells
+        // the user nothing.
+        let text = resp.text().await.unwrap_or_default();
+        let detail = serde_json::from_str::<Value>(&text)
+            .ok()
+            .and_then(|v| v.get("error").and_then(|e| e.as_str().map(String::from)))
+            .unwrap_or(text);
+        let detail: String = detail.chars().take(300).collect();
+        return Err(format!("http {status}: {detail}"));
     }
     resp.json().await.map_err(|e| e.to_string())
 }
