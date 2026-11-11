@@ -59,9 +59,20 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
-      # Sandbox tests need a backend on Linux; ubuntu needs bubblewrap.
+      # Sandbox tests want a backend on Linux; ubuntu needs bubblewrap. The
+      # package mirror is sometimes unreachable from a runner, so retry: the
+      # suite degrades to no sandbox instead of failing on the install.
       - if: runner.os == 'Linux'
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq bubblewrap
+        name: install bubblewrap
+        run: |
+          for attempt in 1 2 3; do
+            if sudo apt-get update -qq && sudo apt-get install -y -qq bubblewrap; then
+              exit 0
+            fi
+            echo "apt failed (attempt $attempt); retrying" >&2
+            sleep 15
+          done
+          echo "warning: bubblewrap unavailable; the suite runs without the OS sandbox"
       # Control-plane tests that need Postgres are #[ignore]d when DATABASE_URL
       # is unset, so no service container is needed here.
       - run: cargo test --locked --workspace
@@ -104,8 +115,20 @@ jobs:
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
       # Headless runs prefer an OS sandbox backend; ubuntu needs bubblewrap.
-      # macOS ships sandbox-exec, so this matrix covers both backends.
+      # macOS ships sandbox-exec, so this matrix covers both backends. The
+      # e2e refuses to run unsandboxed, so a missing package fails the job -
+      # but the mirror is sometimes unreachable, so retry first.
       - if: runner.os == 'Linux'
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq bubblewrap
+        name: install bubblewrap
+        run: |
+          for attempt in 1 2 3; do
+            if sudo apt-get update -qq && sudo apt-get install -y -qq bubblewrap; then
+              exit 0
+            fi
+            echo "apt failed (attempt $attempt); retrying" >&2
+            sleep 15
+          done
+          echo "bubblewrap is required for the e2e sandbox scenarios" >&2
+          exit 1
       - run: cargo build --locked -p freedas
       - run: FREEDAS_BIN=$PWD/target/debug/freedas bash scripts/e2e.sh
