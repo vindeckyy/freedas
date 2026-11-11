@@ -10,9 +10,12 @@ use freedas_core::paths::Paths;
 use freedas_core::{FreedasError, Result};
 use freedas_db::Db;
 use freedas_provider::{
-    ChatEvent, ChatMessage, ChatRequest, ModelRef, Provider, ProviderError, ToolCallRef,
-    ToolSchema, fake::FakeProvider,
+    ChatEvent, ChatMessage, ChatRequest, ModelRef, Provider, ProviderError, ToolCallRef, ToolSchema,
 };
+// The fake provider is a debug-only stand-in: it must not exist in a
+// release build, or a shipped binary could answer with it.
+#[cfg(debug_assertions)]
+use freedas_provider::fake::FakeProvider;
 use freedas_router::{StepContext as RouterCtx, select_with as router_select};
 use freedas_tools::{ToolContext, registry as tool_registry};
 use futures::StreamExt;
@@ -214,6 +217,7 @@ impl Runner {
     }
     fn provider_for(&self, provider_id: &str) -> Arc<dyn Provider> {
         // Offline runs (tests, e2e) can force the fake provider.
+        #[cfg(debug_assertions)]
         if std::env::var("FREEDAS_TEST_PROVIDER").as_deref() == Ok("fake") {
             return Arc::new(FakeProvider);
         }
@@ -221,6 +225,7 @@ impl Runner {
         match provider_id {
             "anthropic" => Arc::new(freedas_provider::anthropic::Anthropic::new(stored)),
             "google" | "gemini" => Arc::new(freedas_provider::gemini::Gemini::new(stored)),
+            #[cfg(debug_assertions)]
             "fake" => Arc::new(FakeProvider),
             "opencode-go" => Arc::new(
                 freedas_provider::openai_compatible::OpenAiCompatible::opencode(

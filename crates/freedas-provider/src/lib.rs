@@ -427,9 +427,10 @@ pub(crate) fn usage_cost(
     cache_read: u64,
     cache_write: u64,
 ) -> f64 {
-    let catalog = freedas_catalog::builtin_catalog();
     let full = format!("{}/{}", model.provider, model.id);
-    let Some(info) = freedas_catalog::get_model(&catalog, &full) else {
+    // The catalog is borrowed, not rebuilt: this runs on every provider
+    // response and rebuilding ~100 models per call is pure waste.
+    let Some(info) = freedas_catalog::get_model(freedas_catalog::builtin(), &full) else {
         return 0.0;
     };
     info.usage_cost(input, cache_read, cache_write, output)
@@ -570,6 +571,19 @@ pub mod fake {
                     serde_json::to_string(&request.tools).map_or(0, |s| s.len()),
                     request.tools.len(),
                 );
+                // Per-block breakdown: the system prompt is the biggest part of
+                // every request, so tuning it needs the block sizes.
+                for (index, block) in request.system.iter().enumerate() {
+                    let head: String = block.chars().take(48).collect();
+                    eprintln!("  system[{index}] {}B: {head}", block.len());
+                }
+                for (index, tool) in request.tools.iter().enumerate() {
+                    eprintln!(
+                        "  tool[{index}] {} {}B",
+                        tool.name,
+                        serde_json::to_string(&tool.schema).map_or(0, |s| s.len())
+                    );
+                }
             }
             events.push(Ok(ChatEvent::Start));
             // Only a user turn is a prompt: tool results are transcript, not

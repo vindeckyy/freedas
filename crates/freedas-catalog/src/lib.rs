@@ -86,7 +86,24 @@ impl ModelInfo {
     }
 }
 
+/// The bundled catalog, built once per process.
+///
+/// Every call to [`builtin_catalog`] rebuilds ~100 models and their strings.
+/// Code that only reads the catalog (pricing, model lookup) should borrow
+/// this instead: a provider response prices its usage on every call.
+static BUILTIN: std::sync::LazyLock<Vec<ModelInfo>> = std::sync::LazyLock::new(build_builtin);
+
+/// The bundled catalog, borrowed. Building it costs ~100 allocations, so
+/// hot paths (per-response pricing) use this rather than cloning.
+pub fn builtin() -> &'static [ModelInfo] {
+    &BUILTIN
+}
+
 pub fn builtin_catalog() -> Vec<ModelInfo> {
+    build_builtin()
+}
+
+fn build_builtin() -> Vec<ModelInfo> {
     vec![
         // Cheap tier
         mk(
@@ -612,5 +629,18 @@ mod tests {
         let cost = m.usage_cost(2_000_000, 1_000_000, 1_000_000, 1_000_000);
         let expect = 10.0 + 1.0 + 12.5 + 50.0;
         assert!((cost - expect).abs() < 1e-9);
+    }
+
+    /// The catalog is built once per process: rebuilding ~100 models on every
+    /// provider response is pure waste.
+    #[test]
+    fn the_bundled_catalog_is_built_once() {
+        let first = builtin();
+        let second = builtin();
+        assert!(
+            std::ptr::eq(first.as_ptr(), second.as_ptr()),
+            "the catalog must be cached, not rebuilt per call"
+        );
+        assert_eq!(first.len(), builtin_catalog().len());
     }
 }

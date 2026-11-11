@@ -77,6 +77,18 @@ jobs:
       # is unset, so no service container is needed here.
       - run: cargo test --locked --workspace
 
+  release:
+    name: release build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+      # The published binaries and the README benchmarks come from the release
+      # profile. It compiles things the debug profile does not (a debug-only
+      # module gated out, for one), so it needs its own build.
+      - run: cargo build --locked --release --workspace
+
   control:
     name: control plane (postgres)
     runs-on: ubuntu-latest
