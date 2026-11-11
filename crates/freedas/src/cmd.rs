@@ -1562,6 +1562,11 @@ pub async fn run(cli: Cli, project_root: PathBuf) -> Result<i32, Box<dyn std::er
                         event.get("action").and_then(|v| v.as_str()).unwrap_or(""),
                         event.get("resource").and_then(|v| v.as_str()).unwrap_or("")
                     ),
+                    "session.marker" => {
+                        if let Some(m) = event.get("marker").and_then(|v| v.as_str()) {
+                            println!("[{m}]");
+                        }
+                    }
                     "tool.result" => {
                         if event.get("ok").and_then(|v| v.as_bool()) == Some(false) {
                             println!(
