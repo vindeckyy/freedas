@@ -2515,6 +2515,15 @@ async fn attach_run(opts: AttachRun) -> Result<i32, Box<dyn std::error::Error>> 
                         .into());
                     }
                     "session.idle" => break 'outer,
+                    "tool.result" => {
+                        if !json_mode && event["ok"].as_bool() == Some(false) {
+                            eprintln!(
+                                "{} failed: {}",
+                                event["tool"].as_str().unwrap_or("tool"),
+                                event["output"].as_str().unwrap_or("")
+                            );
+                        }
+                    }
                     _ => {}
                 }
             }
