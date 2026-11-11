@@ -207,7 +207,13 @@ impl SnapshotStore {
     fn env(&self, project: &Path, cmd: &mut tokio::process::Command) {
         cmd.env("GIT_DIR", self.dir.join("repo.git"))
             .env("GIT_WORK_TREE", project)
-            .env("GIT_INDEX_FILE", &self.index);
+            .env("GIT_INDEX_FILE", &self.index)
+            // Shadow commits are internal bookkeeping; they must not depend on
+            // a git identity the user may not have configured (CI runners).
+            .env("GIT_AUTHOR_NAME", "freedas")
+            .env("GIT_AUTHOR_EMAIL", "freedas@localhost")
+            .env("GIT_COMMITTER_NAME", "freedas")
+            .env("GIT_COMMITTER_EMAIL", "freedas@localhost");
     }
 
     /// Run a shadow-git subcommand, returning its output or git's stderr.
