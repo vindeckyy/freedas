@@ -1006,7 +1006,7 @@ pub async fn run(cli: Cli, project_root: PathBuf) -> Result<i32, Box<dyn std::er
                     for s in freedas_mcp::status_from_config(&cfg) {
                         println!(
                             "{}\t{}\ttools={} prompts={}",
-                            s.name,
+                            flat(&s.name),
                             s.state,
                             s.tools_label(),
                             s.prompts_label()
@@ -1141,9 +1141,9 @@ pub async fn run(cli: Cli, project_root: PathBuf) -> Result<i32, Box<dyn std::er
             if list {
                 for spec in &cfg.plugin {
                     match spec {
-                        freedas_core::config::PluginSpec::Simple(s) => println!("{s}"),
+                        freedas_core::config::PluginSpec::Simple(s) => println!("{}", flat(s)),
                         freedas_core::config::PluginSpec::WithOptions { package, .. } => {
-                            println!("{package}")
+                            println!("{}", flat(package))
                         }
                     }
                 }
