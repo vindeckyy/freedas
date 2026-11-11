@@ -914,7 +914,7 @@ function renderSessions() {
     title.textContent = s.title || "(untitled)";
     const meta = document.createElement("span");
     meta.className = "meta";
-    meta.textContent = [s.agent, s.status, relTime(s.updatedAt)].filter(Boolean).join(" · ");
+    meta.textContent = [s.parentID ? "sub" : null, s.agent, s.status, relTime(s.updatedAt)].filter(Boolean).join(" · ");
     b.append(title, meta);
     b.addEventListener("click", () => { location.hash = "#/session/" + s.id; });
     list.append(b);
