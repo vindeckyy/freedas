@@ -2521,6 +2521,13 @@ async fn attach_run(opts: AttachRun) -> Result<i32, Box<dyn std::error::Error>> 
     let base = opts.base.trim_end_matches('/').to_string();
     let client = server_client().map_err(|e| format!("attach: {e}"))?;
     let mut session_id = opts.session;
+    if let Some(id) = &session_id {
+        // An unknown id must fail fast: the SSE stream is filtered by
+        // sessionID, so a bad id would hang until the read timeout.
+        freedas_server::client::request(&client, &format!("{base}/session/{id}"), "GET", None)
+            .await
+            .map_err(|e| format!("attach: session {id}: {}", scrub_url(&e, &base)))?;
+    }
     if session_id.is_none() && opts.resume_latest {
         let rows = freedas_server::client::request(
             &client,
