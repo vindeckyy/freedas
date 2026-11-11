@@ -228,9 +228,17 @@ pub async fn run(cli: Cli, project_root: PathBuf) -> Result<i32, Box<dyn std::er
                 format!("{}\n[truncated {} bytes]", &text[..end], text.len() - end)
             };
             let mut prompt = task.clone();
+            // Reads are capped too: a huge file/piped log is truncated before
+            // it ever sits in memory, not just in the final prompt.
+            const PROMPT_SOURCE_READ_CAP: u64 = 1024 * 1024;
             for f in &file {
-                match std::fs::read_to_string(f) {
-                    Ok(c) => prompt.push_str(&format!("\n\n--- {f} ---\n{}", cap_source(&c))),
+                let mut c = String::new();
+                let read = std::fs::File::open(f).and_then(|file| {
+                    use std::io::Read;
+                    std::io::Read::take(file, PROMPT_SOURCE_READ_CAP).read_to_string(&mut c)
+                });
+                match read {
+                    Ok(_) => prompt.push_str(&format!("\n\n--- {f} ---\n{}", cap_source(&c))),
                     Err(e) => {
                         return Err(format!("cannot read {}: {e}", scrub_home(f)).into());
                     }
@@ -239,7 +247,12 @@ pub async fn run(cli: Cli, project_root: PathBuf) -> Result<i32, Box<dyn std::er
             if !std::io::IsTerminal::is_terminal(&std::io::stdin()) {
                 use std::io::Read;
                 let mut buf = String::new();
-                if std::io::stdin().read_to_string(&mut buf).is_ok() && !buf.trim().is_empty() {
+                if std::io::stdin()
+                    .take(PROMPT_SOURCE_READ_CAP)
+                    .read_to_string(&mut buf)
+                    .is_ok()
+                    && !buf.trim().is_empty()
+                {
                     prompt.push_str(&format!("\n\n--- stdin ---\n{}", cap_source(&buf)));
                 }
             }
@@ -655,7 +668,13 @@ pub async fn run(cli: Cli, project_root: PathBuf) -> Result<i32, Box<dyn std::er
             Ok(0)
         }
         Some(Commands::Import { file }) => {
-            let text = std::fs::read_to_string(&file)?;
+            // Session exports can be legitimately large; bound the read so a
+            // pathological file cannot exhaust memory before parsing.
+            const MAX_EXPORT_BYTES: u64 = 64 * 1024 * 1024;
+            let mut text = String::new();
+            use std::io::Read;
+            let fh = std::fs::File::open(&file)?;
+            std::io::Read::take(fh, MAX_EXPORT_BYTES).read_to_string(&mut text)?;
             let v: serde_json::Value = serde_json::from_str(&text)?;
             let pid = d.ensure_project(&project_root)?;
             let report = d.import_session(&pid, &v)?;
@@ -729,13 +748,22 @@ pub async fn run(cli: Cli, project_root: PathBuf) -> Result<i32, Box<dyn std::er
         }) => {
             let root = dir.map(PathBuf::from).unwrap_or(project_root.clone());
             if let Some(mem) = memory {
+                // Cap the read itself: parse_memory_import bounds records, but
+                // a multi-GB file would already be in memory by then.
+                const MAX_IMPORT_BYTES: u64 = 16 * 1024 * 1024;
                 let text = if mem == "-" {
                     use std::io::Read;
                     let mut s = String::new();
-                    std::io::stdin().read_to_string(&mut s)?;
+                    std::io::stdin()
+                        .take(MAX_IMPORT_BYTES)
+                        .read_to_string(&mut s)?;
                     s
                 } else {
-                    std::fs::read_to_string(&mem)?
+                    use std::io::Read;
+                    let file = std::fs::File::open(&mem)?;
+                    let mut s = String::new();
+                    std::io::Read::take(file, MAX_IMPORT_BYTES).read_to_string(&mut s)?;
+                    s
                 };
                 let records = freedas_memory::parse_memory_import(&text);
                 // Project scope by default so an import only affects this project;
