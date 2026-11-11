@@ -1310,6 +1310,86 @@ mod tests {
             Effect::Allow
         );
     }
+
+    /// Rule precedence, which is the security contract of the engine:
+    /// last match wins inside a layer, a config deny is sticky across layers,
+    /// and agent rules (which carry the session's remembered answers) override
+    /// a config allow or ask.
+    fn rule(action: &str, resource: &str, effect: &str) -> PermissionRule {
+        PermissionRule::new(action, resource, effect)
+    }
+
+    fn config_with(rules: Vec<PermissionRule>) -> Config {
+        let mut config = Config::default();
+        config.permission.rules = rules;
+        config
+    }
+
+    #[test]
+    fn the_last_matching_rule_wins_inside_a_layer() {
+        let config = config_with(vec![
+            rule("read", "*.env", "allow"),
+            rule("read", ".env", "deny"),
+        ]);
+        assert_eq!(resolve(&config, "read", ".env", &[]), Effect::Deny);
+        let config = config_with(vec![
+            rule("read", ".env", "deny"),
+            rule("read", "*.env", "allow"),
+        ]);
+        assert_eq!(resolve(&config, "read", ".env", &[]), Effect::Allow);
+    }
+
+    #[test]
+    fn a_config_deny_survives_an_agent_allow() {
+        let config = config_with(vec![rule("bash", "rm -rf /", "deny")]);
+        let agents = vec![rule("bash", "rm -rf /", "allow")];
+        assert_eq!(resolve(&config, "bash", "rm -rf /", &agents), Effect::Deny);
+    }
+
+    #[test]
+    fn an_agent_rule_overrides_a_config_ask() {
+        let config = config_with(vec![rule("read", ".env", "ask")]);
+        let agents = vec![rule("read", ".env", "allow")];
+        assert_eq!(resolve(&config, "read", ".env", &agents), Effect::Allow);
+    }
+
+    #[test]
+    fn a_wildcard_action_matches_every_action() {
+        let config = config_with(vec![rule("*", "secret.txt", "deny")]);
+        assert_eq!(resolve(&config, "read", "secret.txt", &[]), Effect::Deny);
+        assert_eq!(resolve(&config, "edit", "secret.txt", &[]), Effect::Deny);
+    }
+
+    #[test]
+    fn a_bash_rule_also_matches_the_command_without_arguments() {
+        let config = config_with(vec![rule("bash", "git status *", "deny")]);
+        assert_eq!(resolve(&config, "bash", "git status", &[]), Effect::Deny);
+        assert_eq!(
+            resolve(&config, "bash", "git status --short", &[]),
+            Effect::Deny
+        );
+        assert_eq!(resolve(&config, "bash", "git push", &[]), Effect::Ask);
+    }
+
+    #[test]
+    fn combine_is_deny_if_any_resource_denies() {
+        let config = config_with(vec![rule("read", ".env", "deny")]);
+        let resources = vec![
+            ("read".to_string(), "src/main.rs".to_string()),
+            ("read".to_string(), ".env".to_string()),
+        ];
+        assert_eq!(combine(&resources, &config, &[]), Effect::Deny);
+    }
+
+    #[test]
+    fn combine_asks_if_any_resource_asks() {
+        let config = config_with(vec![rule("read", ".env", "ask")]);
+        let resources = vec![
+            ("read".to_string(), "src/main.rs".to_string()),
+            ("read".to_string(), ".env".to_string()),
+        ];
+        assert_eq!(combine(&resources, &config, &[]), Effect::Ask);
+    }
 }
 
 #[cfg(test)]
