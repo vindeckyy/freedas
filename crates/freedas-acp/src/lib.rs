@@ -527,6 +527,14 @@ impl AcpServer {
                         response(response_id.clone(), json!({ "finishReason": "permission" })),
                     ]
                 }
+                // Cancel is a normal outcome, not a fault: answer the prompt
+                // with a finishReason so the client does not report failure.
+                Err(freedas_core::FreedasError::Cancelled) => {
+                    vec![response(
+                        response_id.clone(),
+                        json!({ "finishReason": "cancelled" }),
+                    )]
+                }
                 Err(error) => {
                     vec![rpc_error(response_id.clone(), -32000, error.to_string())]
                 }
