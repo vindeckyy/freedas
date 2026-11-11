@@ -139,6 +139,12 @@ pub async fn create_worktree(
             .map_err(|e| e.to_string())?;
     }
     let branch = format!("freedas/{name}");
+    // Remember whether the branch is ours so a failed `worktree add` cleans
+    // up only what it created - never a pre-existing freedas/<name> branch.
+    let branch_existed = git(&["rev-parse", "--verify", "--quiet", &branch], cwd)
+        .await
+        .map(|o| o.status.success())
+        .unwrap_or(false);
     let out = git(
         &[
             "worktree",
@@ -153,6 +159,9 @@ pub async fn create_worktree(
     .await
     .map_err(|e| e.to_string())?;
     if !out.status.success() {
+        if !branch_existed {
+            let _ = git(&["branch", "-D", &branch], cwd).await;
+        }
         return Err(String::from_utf8_lossy(&out.stderr).to_string());
     }
     Ok(dest)
