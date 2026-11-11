@@ -1519,6 +1519,11 @@ impl Runner {
                 }};
             }
             'tool: for (call_id, name, args) in &tool_calls {
+                // Announce the call before dispatch so UIs can show a running
+                // tool instead of only learning about it at completion.
+                if let Some(p) = &progress {
+                    p(format!("\u{1}{name}"));
+                }
                 let mut args = args.clone();
                 for plugin in &plugins {
                     // A `tool.before` hook returns `{"input": ...}`. The rewrite
@@ -1818,7 +1823,6 @@ impl Runner {
                 // Persist the result so resume and export keep tool outputs;
                 // without this a continued session loses all tool context.
                 if let Some(p) = &progress {
-                    p(format!("\u{1}{name}"));
                     p(tool_result_event(name, ok, &result_text, diff.as_deref()));
                 }
                 persist_result!(call_id, name, result_text);
