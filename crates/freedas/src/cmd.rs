@@ -1621,6 +1621,9 @@ pub async fn run(cli: Cli, project_root: PathBuf) -> Result<i32, Box<dyn std::er
             freedas_server::client::stream_events(&url, |event: serde_json::Value| async move {
                 let kind = event.get("type").and_then(|v| v.as_str()).unwrap_or("");
                 match kind {
+                    "server.lagged" | "server.gap" => println!(
+                        "[warning] the server dropped events; this view may be incomplete"
+                    ),
                     "message.part.delta" => {
                         if let Some(t) = event.get("text").and_then(|v| v.as_str()) {
                             use std::io::Write;
@@ -2566,6 +2569,31 @@ fn server_client() -> Result<reqwest::Client, String> {
     builder.build().map_err(|e| e.to_string())
 }
 
+/// What the attach viewer does with a server event.
+#[derive(Debug, PartialEq, Eq)]
+enum AttachEvent {
+    /// Belongs to another session.
+    Ignore,
+    /// The server dropped events; the transcript is incomplete.
+    Gap,
+    /// A session event to render.
+    Session,
+}
+
+/// Classify a server event for the attach viewer. The gap markers carry no
+/// session id, so they have to be recognized before the session filter.
+fn classify_attach_event(event: &serde_json::Value, session_id: &str) -> AttachEvent {
+    let kind = event.get("type").and_then(|v| v.as_str()).unwrap_or("");
+    if matches!(kind, "server.lagged" | "server.gap") {
+        return AttachEvent::Gap;
+    }
+    if event.get("sessionID").and_then(|v| v.as_str()) == Some(session_id) {
+        AttachEvent::Session
+    } else {
+        AttachEvent::Ignore
+    }
+}
+
 /// Run one prompt against a server and stream its events until idle.
 async fn attach_run(opts: AttachRun) -> Result<i32, Box<dyn std::error::Error>> {
     if opts.format != "json" && opts.format != "text" {
@@ -2707,8 +2735,22 @@ async fn attach_run(opts: AttachRun) -> Result<i32, Box<dyn std::error::Error>> 
                 let Ok(event) = serde_json::from_str::<serde_json::Value>(data.trim()) else {
                     continue;
                 };
-                if event.get("sessionID").and_then(|v| v.as_str()) != Some(session_id.as_str()) {
-                    continue;
+                match classify_attach_event(&event, &session_id) {
+                    AttachEvent::Ignore => continue,
+                    AttachEvent::Gap => {
+                        // The server dropped events: the stream below is
+                        // missing part of the run. Say so instead of showing
+                        // a silent gap.
+                        if json_mode {
+                            println!("{event}");
+                        } else {
+                            eprintln!(
+                                "warning: the server dropped events; this view may be incomplete"
+                            );
+                        }
+                        continue;
+                    }
+                    AttachEvent::Session => {}
                 }
                 let kind = event.get("type").and_then(|v| v.as_str()).unwrap_or("");
                 if json_mode {
@@ -3093,6 +3135,18 @@ fn flat(text: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn attach_events_are_classified_by_session_and_gap() {
+        let ours = serde_json::json!({"type": "message.part.delta", "sessionID": "ses_1"});
+        let theirs = serde_json::json!({"type": "message.part.delta", "sessionID": "ses_2"});
+        let lagged = serde_json::json!({"type": "server.lagged", "dropped": 3});
+        let gap = serde_json::json!({"type": "server.gap", "since": 4});
+        assert_eq!(classify_attach_event(&ours, "ses_1"), AttachEvent::Session);
+        assert_eq!(classify_attach_event(&theirs, "ses_1"), AttachEvent::Ignore);
+        assert_eq!(classify_attach_event(&lagged, "ses_1"), AttachEvent::Gap);
+        assert_eq!(classify_attach_event(&gap, "ses_1"), AttachEvent::Gap);
+    }
 
     fn temp_dir(tag: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("freedas-cmd-{tag}-{}", ulid::Ulid::new()));

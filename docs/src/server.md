@@ -92,6 +92,10 @@ that `permission.asked` event, unless it already received it - the frame is
 repeated without an `id`, so the client's replay position does not move past
 events it has not seen.
 
+`server.lagged` and `server.gap` mean the client missed events. The web UI
+refetches the transcript, and `freedas attach` prints a warning that the view
+may be incomplete.
+
 ## Clients
 
 - `freedas attach <url>` - a live read-only transcript view of a running server.
