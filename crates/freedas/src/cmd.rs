@@ -2209,7 +2209,15 @@ struct StdinApprover;
 impl freedas_tools::PermissionApprover for StdinApprover {
     fn ask(&self, action: &str, resource: &str) -> freedas_tools::PermissionReply {
         use std::io::{BufRead, Write};
-        eprint!("Allow {action} {resource}? [y/a/n] ");
+        // Model-written commands can carry newlines and control chars that
+        // would spoof extra prompt lines; flatten and cap before printing.
+        let clean = |s: &str| -> String {
+            s.chars()
+                .map(|c| if c.is_control() { ' ' } else { c })
+                .take(500)
+                .collect()
+        };
+        eprint!("Allow {} {}? [y/a/n] ", clean(action), clean(resource));
         let _ = std::io::stderr().flush();
         let mut line = String::new();
         let _ = std::io::stdin().lock().read_line(&mut line);
