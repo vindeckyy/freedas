@@ -354,7 +354,24 @@ pub async fn run(cli: Cli, project_root: PathBuf) -> Result<i32, Box<dyn std::er
                             })
                                 as freedas_session::ProgressSink)
                         } else {
-                            None
+                            // Text mode: surface tool names as they run and
+                            // failures on stderr; the final text still goes to
+                            // stdout alone for clean piping.
+                            Some(std::sync::Arc::new(|msg: String| {
+                                if let Some(marker) = msg.strip_prefix('\u{1}') {
+                                    eprintln!("{marker}");
+                                } else if let Some(json) = msg.strip_prefix('\u{2}')
+                                    && let Ok(v) = serde_json::from_str::<serde_json::Value>(json)
+                                    && v["ok"].as_bool() == Some(false)
+                                {
+                                    eprintln!(
+                                        "{} failed: {}",
+                                        v["tool"].as_str().unwrap_or("tool"),
+                                        v["output"].as_str().unwrap_or("")
+                                    );
+                                }
+                            })
+                                as freedas_session::ProgressSink)
                         },
                         headless: true,
                         mcp_disabled: Vec::new(),
