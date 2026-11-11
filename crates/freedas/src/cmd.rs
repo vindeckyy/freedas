@@ -150,7 +150,18 @@ pub async fn run(cli: Cli, project_root: PathBuf) -> Result<i32, Box<dyn std::er
                     session_id = d.list_sessions(&pid, 1)?.first().map(|s| s.id.clone());
                 }
                 if let Some(sid) = &cli.session {
-                    session_id = Some(sid.clone());
+                    // Same project-scope guard as `run --session`.
+                    match d.session_full(sid)? {
+                        Some(s) if s.project_id == pid => session_id = Some(sid.clone()),
+                        Some(_) => {
+                            eprintln!("freedas: session {sid} belongs to a different project");
+                            return Ok(2);
+                        }
+                        None => {
+                            eprintln!("freedas: session {sid} not found");
+                            return Ok(2);
+                        }
+                    }
                 }
                 if cli.fork
                     && let Some(sid) = &session_id
@@ -294,7 +305,19 @@ pub async fn run(cli: Cli, project_root: PathBuf) -> Result<i32, Box<dyn std::er
                 session_id = d.list_sessions(&pid, 1)?.first().map(|s| s.id.clone());
             }
             if let Some(sid) = session {
-                session_id = Some(sid);
+                // Sessions are project-scoped: an id from another project would
+                // resume with this project's root and corrupt both histories.
+                match d.session_full(&sid)? {
+                    Some(s) if s.project_id == pid => session_id = Some(sid),
+                    Some(_) => {
+                        eprintln!("freedas: session {sid} belongs to a different project");
+                        return Ok(2);
+                    }
+                    None => {
+                        eprintln!("freedas: session {sid} not found");
+                        return Ok(2);
+                    }
+                }
             }
             if fork && let Some(sid) = &session_id {
                 session_id = Some(d.fork_session(&pid, sid, None)?);
