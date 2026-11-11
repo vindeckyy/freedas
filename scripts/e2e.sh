@@ -90,7 +90,7 @@ SID=$($BIN run "ECHO:abc" --format json 2>/dev/null | grep -o 'ses_[A-Z0-9]*' | 
 $BIN export "$SID" > /tmp/fexp.json 2>/dev/null
 check "export has messages" "grep -q '\"role\"' /tmp/fexp.json || grep -q role /tmp/fexp.json"
 check "export has session"  "grep -q '$SID' /tmp/fexp.json"
-$BIN import /tmp/fexp.json >/dev/null 2>&1 || true
+check "import ok"           "$BIN import /tmp/fexp.json 2>/dev/null | grep -q 'imported session'"
 check "session list"        "$BIN session list | grep -q '$SID'"
 check "session rename"      "$BIN session rename '$SID' renamed-e2e >/dev/null 2>&1 && $BIN session list | grep -q renamed-e2e"
 check "agent list"          "$BIN agent list | grep -q build"
