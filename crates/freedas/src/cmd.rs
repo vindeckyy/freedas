@@ -1112,12 +1112,12 @@ pub async fn run(cli: Cli, project_root: PathBuf) -> Result<i32, Box<dyn std::er
                             println!("connected to {name}");
                             if let Ok(tools) = freedas_mcp::list_tools(&s).await {
                                 for t in tools.tools {
-                                    println!("tool\t{}", t.name);
+                                    println!("tool\t{}", flat(&t.name));
                                 }
                             }
                             if let Ok(prompts) = freedas_mcp::list_prompts(&s).await {
                                 for pr in prompts {
-                                    println!("prompt\t{pr}");
+                                    println!("prompt\t{}", flat(&pr));
                                 }
                             }
                         }
