@@ -609,8 +609,13 @@ async fn delete_session(State(s): State<AppState>, AxumPath(id): AxumPath<String
     if session_for(&s, &id)?.is_none() {
         return Err(missing(format!("session {id} not found")));
     }
-    let deleted = s.db.delete_session(&id).map_err(internal)?;
+    // Cancel first: once the row is gone `abort` 404s, leaving the live run
+    // unkillable and writing into a deleted transcript.
+    if let Some(token) = s.aborts.lock().expect("aborts").get(&id) {
+        token.cancel();
+    }
     drain_pending(&s.pending_perms, &id);
+    let deleted = s.db.delete_session(&id).map_err(internal)?;
     s.emit(json!({"type": "session.deleted", "sessionID": id}));
     Ok(Json(json!({"deleted": deleted})))
 }
