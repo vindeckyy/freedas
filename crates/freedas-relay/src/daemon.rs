@@ -469,11 +469,12 @@ fn poll_db(
                 sender,
                 seqs,
                 &session_id,
+                // Same part shape as GET /session/{id}/message.
                 json!({
                     "type": "message.part.updated",
                     "sessionID": session_id,
                     "messageID": values[0],
-                    "part": { "kind": values[1], "data": data },
+                    "part": { "type": values[1], "data": data },
                 }),
             );
             advance(&mut cursor.part, rowid, sent);
@@ -560,8 +561,10 @@ fn spawn_prompt(
                 let session_id = session_id.clone();
                 Arc::new(move |chunk: String| {
                     let event = if let Some(marker) = chunk.strip_prefix('\u{1}') {
+                        // Same type the SSE server emits so dashboards share
+                        // one event vocabulary.
                         json!({
-                            "type": "relay.marker",
+                            "type": "session.marker",
                             "sessionID": session_id,
                             "marker": marker,
                         })
@@ -575,22 +578,24 @@ fn spawn_prompt(
                             })
                             .unwrap_or_else(|_| {
                                 json!({
-                                    "type": "message.part.updated",
+                                    "type": "message.part.delta",
                                     "sessionID": session_id,
-                                    "part": { "kind": "text", "data": { "text": chunk } },
+                                    "text": chunk,
                                 })
                             })
                     } else if let Some(t) = chunk.strip_prefix('\u{3}') {
+                        // Match the server's delta shapes so dashboards share
+                        // one vocabulary; reasoning must never read as text.
                         json!({
-                            "type": "message.part.updated",
+                            "type": "message.part.delta",
                             "sessionID": session_id,
-                            "part": { "kind": "reasoning", "data": { "text": t } },
+                            "part": { "type": "reasoning", "text": t },
                         })
                     } else {
                         json!({
-                            "type": "message.part.updated",
+                            "type": "message.part.delta",
                             "sessionID": session_id,
-                            "part": { "kind": "text", "data": { "text": chunk } },
+                            "text": chunk,
                         })
                     };
                     let _ = send_event(&sender, &seqs, &session_id, event);
