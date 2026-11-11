@@ -1562,7 +1562,16 @@ pub async fn run(cli: Cli, project_root: PathBuf) -> Result<i32, Box<dyn std::er
                         event.get("action").and_then(|v| v.as_str()).unwrap_or(""),
                         event.get("resource").and_then(|v| v.as_str()).unwrap_or("")
                     ),
-                    "session.completed" | "session.error" | "session.idle" => {
+                    "tool.result" => {
+                        if event.get("ok").and_then(|v| v.as_bool()) == Some(false) {
+                            println!(
+                                "[tool failed] {}: {}",
+                                event.get("tool").and_then(|v| v.as_str()).unwrap_or("tool"),
+                                event.get("output").and_then(|v| v.as_str()).unwrap_or("")
+                            );
+                        }
+                    }
+                    "session.completed" | "session.error" | "session.idle" | "session.stopped" => {
                         println!("[{kind}]")
                     }
                     _ => {}
