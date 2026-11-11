@@ -618,9 +618,9 @@ fn spawn_prompt(
                     "text": result.text,
                 }),
                 Err(error) => json!({
-                    "type": "error",
+                    "type": "session.error",
                     "sessionID": session_id,
-                    "message": error.to_string(),
+                    "error": error.to_string(),
                 }),
             };
             let _ = send_event(&sender, &seqs, &session_id, event);
