@@ -701,14 +701,22 @@ pub async fn run(cli: Cli, project_root: PathBuf) -> Result<i32, Box<dyn std::er
                 for t in totals {
                     println!(
                         "{}\t{}\tin={}\tout={}\tcost=${:.6}",
-                        t.provider, t.model, t.input, t.output, t.cost
+                        flat(&t.provider),
+                        flat(&t.model),
+                        t.input,
+                        t.output,
+                        t.cost
                     );
                 }
             } else {
                 for t in totals {
                     println!(
                         "{}\t{}\tin={}\tout={}\tcost=${:.4}",
-                        t.provider, t.model, t.input, t.output, t.cost
+                        flat(&t.provider),
+                        flat(&t.model),
+                        t.input,
+                        t.output,
+                        t.cost
                     );
                 }
             }
@@ -1828,8 +1836,8 @@ pub async fn run(cli: Cli, project_root: PathBuf) -> Result<i32, Box<dyn std::er
                     for r in d.router_stats()? {
                         println!(
                             "{}\t{}\tattempts={} succ={} fail={} cost=${:.4}",
-                            r.task_class,
-                            r.model,
+                            flat(&r.task_class),
+                            flat(&r.model),
                             r.attempts,
                             r.successes,
                             r.failures,
