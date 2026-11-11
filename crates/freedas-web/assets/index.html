@@ -1303,7 +1303,43 @@ function connect() {
     let event;
     try { event = JSON.parse(msg.data); } catch { return; }
     if (event.type === "server.connected") { setConn("live"); return; }
-    if (event.sessionID && event.sessionID !== state.current) return;
+    // Permission asks are session-agnostic: a parked run on a session you are
+    // not viewing still needs an answer or it stalls for the 10-minute
+    // timeout. Handle them before the sessionID filter drops them.
+    if (event.type === "permission.asked") {
+      askPermission(event);
+      return;
+    }
+    if (event.type === "permission.replied") {
+      dismissPermission(event.permissionID);
+      return;
+    }
+    // Lifecycle events update the sidebar, not the open transcript - they
+    // must fire for every session, not just the viewed one.
+    if (
+      event.type === "session.created" ||
+      event.type === "session.deleted" ||
+      event.type === "session.updated"
+    ) {
+      await loadSessions();
+      return;
+    }
+    if (event.sessionID && event.sessionID !== state.current) {
+      // Sparse run-state events still matter for the sidebar: a background
+      // run finishing must flip its busy indicator even when its transcript
+      // is not open. Deltas stay filtered - refreshing per chunk is waste.
+      if (
+        event.type === "session.status" ||
+        event.type === "session.idle" ||
+        event.type === "session.stopped" ||
+        event.type === "session.error" ||
+        event.type === "message.part.updated" ||
+        event.type === "message.updated"
+      ) {
+        loadSessions();
+      }
+      return;
+    }
     if (event.type === "message.part.delta") {
       state.live += event.text || "";
       $("live").hidden = false;
@@ -1344,13 +1380,6 @@ function connect() {
       await loadSessions();
     } else if (event.type === "message.updated") {
       if (state.current) await loadMessages(state.current);
-    } else if (event.type === "permission.asked") {
-      // A modal, not a native prompt: the dialog never blocks the event
-      // stream, and every queued request keeps its own permissionID.
-      askPermission(event);
-    } else if (event.type === "permission.replied") {
-      // Another client answered this request; close the same modal here.
-      dismissPermission(event.permissionID);
     } else if (event.type === "session.status") {
       setStatus(event.status === "busy" ? "running" : "idle");
     } else if (event.type === "session.idle") {
@@ -1375,8 +1404,6 @@ function connect() {
       } else {
         banner("error", "Run failed: " + error);
       }
-    } else if (event.type === "session.created" || event.type === "session.deleted" || event.type === "session.updated") {
-      await loadSessions();
     }
   };
 }
