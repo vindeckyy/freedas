@@ -635,6 +635,17 @@ fn spawn_prompt(
                 }),
             };
             let _ = send_event(&sender, &seqs, &session_id, event);
+            // The SSE server always follows the terminal event with
+            // session.idle; dashboards key off it to end the busy state.
+            let _ = send_event(
+                &sender,
+                &seqs,
+                &session_id,
+                json!({
+                    "type": "session.idle",
+                    "sessionID": session_id,
+                }),
+            );
             cancels.lock().expect("cancels").remove(&session_id);
         });
     });
