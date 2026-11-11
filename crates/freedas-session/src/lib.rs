@@ -20,6 +20,25 @@ use freedas_router::{StepContext as RouterCtx, select_with as router_select};
 use freedas_tools::{ToolContext, registry as tool_registry};
 use futures::StreamExt;
 
+/// One line of a skill description for the advertised list.
+///
+/// The full description is read when the skill is loaded, so the prompt only
+/// needs the gist. A skill whose description is a paragraph would otherwise
+/// cost tokens on every request, for every skill, forever.
+fn skill_summary(description: &str) -> String {
+    const MAX_CHARS: usize = 120;
+    let flat = description.split_whitespace().collect::<Vec<_>>().join(" ");
+    if flat.chars().count() <= MAX_CHARS {
+        return flat;
+    }
+    let cut = flat
+        .char_indices()
+        .nth(MAX_CHARS)
+        .map(|(index, _)| &flat[..index])
+        .unwrap_or(&flat);
+    format!("{}…", cut.trim_end())
+}
+
 /// Token/cost totals for one model call.
 #[derive(Debug, Clone, Copy, Default)]
 struct UsageTotals {
@@ -838,7 +857,7 @@ impl Runner {
         if !advertised.is_empty() {
             let mut skill_block = String::from("Available skills (load with the `skill` tool):\n");
             for s in advertised {
-                skill_block.push_str(&format!("- {}: {}\n", s.id, s.description));
+                skill_block.push_str(&format!("- {}: {}\n", s.id, skill_summary(&s.description)));
             }
             system.push(skill_block);
         }
@@ -3040,6 +3059,24 @@ fn clamp_chars(s: &str, max: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_skill_summary_is_one_line_and_bounded() {
+        // A short description is kept as it is.
+        assert_eq!(skill_summary("Cut a release"), "Cut a release");
+        // Whitespace is flattened so a description cannot fake a new entry.
+        assert_eq!(skill_summary("Cut  a\nrelease"), "Cut a release");
+        // A long description is cut to the bound, on a character boundary.
+        let long = "word ".repeat(80);
+        let summary = skill_summary(&long);
+        assert!(
+            summary.chars().count() <= 121,
+            "{}",
+            summary.chars().count()
+        );
+        assert!(summary.ends_with('…'), "{summary}");
+        assert!(summary.starts_with("word word"), "{summary}");
+    }
 
     #[test]
     fn tool_result_event_shape() {
