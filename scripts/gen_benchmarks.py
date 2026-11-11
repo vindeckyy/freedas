@@ -154,6 +154,7 @@ def svg(C, path):
             out.append(
                 f'<line x1="28" y1="{y-8}" x2="{W-28}" y2="{y-8}" '
                 f'stroke="{C["edge"]}" stroke-width="1"/>')
+    out.append("</svg>")
     open(path, "w").write("".join(out))
     print(f"{path}  {total}px")
 

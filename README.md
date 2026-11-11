@@ -21,9 +21,9 @@ spawn, time-to-interactive, idle memory, disk footprint, per-prompt
 overhead, and input tokens per request:
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/benchmarks-dark.svg">
-  <source media="(prefers-color-scheme: light)" srcset="docs/benchmarks-light.svg">
-  <img alt="Freedas benchmark report: freedas ranks first in spawn time, launch-to-interactive, idle memory, disk footprint, per-prompt overhead, and input tokens" src="docs/benchmarks-light.svg">
+  <source media="(prefers-color-scheme: dark)" srcset="docs/benchmarks-dark.png">
+  <source media="(prefers-color-scheme: light)" srcset="docs/benchmarks-light.png">
+  <img alt="Freedas benchmark report: freedas ranks first in spawn time, launch-to-interactive, idle memory, disk footprint, per-prompt overhead, and input tokens" src="docs/benchmarks-light.png">
 </picture>
 
 External numbers are the same-rig medians published at
