@@ -4,6 +4,7 @@
 set -u
 # Absolute path: checks run from inside mktemp project dirs.
 BIN=$(cd "$(dirname "${FREEDAS_BIN:-./target/debug/freedas}")" && pwd)/$(basename "${FREEDAS_BIN:-./target/debug/freedas}")
+ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 export FREEDAS_TEST_PROVIDER=fake
 export FREEDAS_DATA=$(mktemp -d)/data
 export FREEDAS_CONFIG_DIR=$(mktemp -d)/config
@@ -152,6 +153,9 @@ ACP_OUT=$(printf '%s\n%s\n' \
 check "acp initialize" "echo '$ACP_OUT' | grep -q 'protocolVersion'"
 check "acp session/new" "echo '$ACP_OUT' | grep -qo 'ses_[A-Z0-9]*'"
 check "acp bad agent"   "printf '%s\n' '{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"session/new\",\"params\":{\"cwd\":\"$(pwd)\",\"agent\":\"nope\"}}' | $BIN acp 2>/dev/null | grep -q 'unknown agent'"
+
+echo "== 15. spa =="
+check "spa script parses" "bash '$ROOT/scripts/check-spa.sh'"
 
 echo
 echo "PASS=$PASS FAIL=$FAIL"

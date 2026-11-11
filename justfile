@@ -10,6 +10,7 @@ check:
     cargo deny check
     cargo audit
     cargo test --workspace
+    bash scripts/check-spa.sh
 
 test:
     cargo test --workspace

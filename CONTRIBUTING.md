@@ -31,6 +31,10 @@ FREEDAS_BIN=$PWD/target/debug/freedas bash scripts/e2e.sh
 the real CLI against a fake provider in temp directories and does not touch
 your config or database.
 
+The web UI is a single HTML file, so nothing else in the build parses its
+inline JavaScript. `scripts/check-spa.sh` parses it with `node --check`; it
+skips when node is not installed, and CI runs it on every push.
+
 ## Conventions
 
 - **Edition 2024, `thiserror` errors.** Library crates return typed errors;
