@@ -692,8 +692,8 @@ fn spawn_run(s: &AppState, id: String, request: RunRequest) -> Result<(), ApiErr
         && row.title == "New session"
     {
         let title: String = text.chars().take(80).collect();
-        if !title.is_empty() {
-            let _ = s.db.rename_session(&id, &title);
+        if !title.is_empty() && s.db.rename_session(&id, &title).is_ok() {
+            s.emit(json!({"type": "session.updated", "sessionID": id, "title": title}));
         }
     }
     // The runner records the user message itself; the reply streams on the bus.
