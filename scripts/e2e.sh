@@ -118,7 +118,14 @@ PORT=4188
 $BIN serve --port $PORT --hostname 127.0.0.1 &
 SRVPID=$!; sleep 2
 check "health"       "curl -sf http://127.0.0.1:$PORT/global/health | grep -q healthy"
-check "create sess"  "curl -sf -X POST http://127.0.0.1:$PORT/session -H 'content-type: application/json' -d '{}' | grep -q ses_"
+SID2=$(curl -sf -X POST http://127.0.0.1:$PORT/session -H 'content-type: application/json' -d '{}' | grep -o 'ses_[A-Z0-9]*')
+check "create sess"  "test -n \"$SID2\""
+# SSE: PATCH rename must broadcast session.updated to subscribers.
+curl -sN http://127.0.0.1:$PORT/event > "$D/sse.log" &
+SSEPID=$!; sleep 1
+curl -sf -X PATCH "http://127.0.0.1:$PORT/session/$SID2" -H 'content-type: application/json' -d '{"title":"renamed"}' >/dev/null
+sleep 1; kill $SSEPID 2>/dev/null
+check "sse session.updated" "grep -q 'session.updated' '$D/sse.log'"
 cd "$D"
 ATTACH_OUT=$($BIN run --attach "http://127.0.0.1:$PORT" "ECHO:attach" --auto --format json 2>/dev/null)
 check "attach started"   "echo '$ATTACH_OUT' | grep -q 'session.started'"
