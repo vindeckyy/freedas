@@ -1731,10 +1731,6 @@ impl ReviewModel {
     fn record_error(&self, message: String) {
         *self.error.lock().expect("review error lock") = Some(message);
     }
-
-    fn error(&self) -> Option<String> {
-        self.error.lock().expect("review error lock").clone()
-    }
 }
 
 fn chat_url(base: &str) -> String {
