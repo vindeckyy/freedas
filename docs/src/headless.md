@@ -55,6 +55,8 @@ or `FREEDAS_EXPERIMENTAL_SANDBOX=false` to run bare.
 
 ```json
 {"type":"session.started","sessionID":"ses_...","timestamp":1760000000000}
+{"type":"message.part.delta","sessionID":"ses_...","text":"..."}
+{"type":"message.part.delta","sessionID":"ses_...","part":{"type":"reasoning","text":"..."}}
 {"type":"message.part.updated","sessionID":"ses_...","messageID":"msg_...","part":{"type":"text","text":"..."}}
 {"type":"usage","sessionID":"ses_...","provider":"anthropic","model":"claude-sonnet-4-5","inputTokens":123,"outputTokens":45,"costUSD":0.0012}
 {"type":"session.marker","sessionID":"ses_...","marker":"bash"}

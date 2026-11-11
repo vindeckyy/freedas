@@ -70,7 +70,9 @@ pub struct RunResult {
 
 /// Streaming progress: plain strings are assistant text deltas; strings that
 /// start with `\u{1}` are markers (tool calls, gate status); strings that start
-/// with `\u{2}` are tool results (JSON: tool, ok, output, diff?).
+/// with `\u{2}` are tool results (JSON: tool, ok, output, diff?); strings that
+/// start with `\u{3}` are reasoning deltas — consumers must route them to a
+/// reasoning part, never render them as assistant text.
 pub type ProgressSink = std::sync::Arc<dyn Fn(String) + Send + Sync>;
 
 #[derive(Clone, Default)]
