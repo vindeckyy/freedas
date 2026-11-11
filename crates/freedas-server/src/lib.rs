@@ -1692,7 +1692,27 @@ pub async fn serve_with_cors(host: &str, port: u16, origins: Vec<String>) -> std
         },
     ));
     println!("freedas server on http://{addr}");
-    axum::serve(listener, app).await
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal())
+        .await
+}
+
+/// Resolves on Ctrl-C or SIGTERM so the listener stops accepting, in-flight
+/// requests drain, and the process exits 0 under systemd/launchd.
+async fn shutdown_signal() {
+    #[cfg(unix)]
+    {
+        let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("SIGTERM");
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {}
+            _ = term.recv() => {}
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+    }
 }
 
 pub async fn serve(host: &str, port: u16) -> std::io::Result<()> {
@@ -1707,7 +1727,9 @@ pub async fn serve(host: &str, port: u16) -> std::io::Result<()> {
     }
     let app = app_with_auth(db, paths, Auth::from_env(is_loopback_host(host)));
     println!("freedas server on http://{addr}");
-    axum::serve(listener, app).await
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal())
+        .await
 }
 
 #[cfg(test)]
