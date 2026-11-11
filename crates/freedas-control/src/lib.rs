@@ -23,6 +23,62 @@ use sqlx::PgPool;
 type ApiError = (StatusCode, Json<Value>);
 type ApiResult<T = Json<Value>> = Result<T, ApiError>;
 
+/// Table DDL for the control plane. Applied at startup under the
+/// database lock that [`migrate`] takes, so two instances cannot race.
+pub const MIGRATIONS: &[&str] = &[
+    "CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, email TEXT NOT NULL UNIQUE, name TEXT NOT NULL, password_hash TEXT, oidc_sub TEXT UNIQUE, active BOOLEAN NOT NULL DEFAULT TRUE, created_at BIGINT NOT NULL)",
+    "ALTER TABLE users ADD COLUMN IF NOT EXISTS active BOOLEAN NOT NULL DEFAULT TRUE",
+    "CREATE TABLE IF NOT EXISTS workspaces (id TEXT PRIMARY KEY, slug TEXT NOT NULL UNIQUE, name TEXT NOT NULL, kind TEXT NOT NULL, owner_id TEXT REFERENCES users(id), settings JSONB NOT NULL DEFAULT '{}'::jsonb, created_at BIGINT NOT NULL)",
+    "CREATE TABLE IF NOT EXISTS memberships (workspace_id TEXT REFERENCES workspaces(id) ON DELETE CASCADE, user_id TEXT REFERENCES users(id) ON DELETE CASCADE, role TEXT NOT NULL, PRIMARY KEY (workspace_id, user_id))",
+    "CREATE TABLE IF NOT EXISTS wallet_ledger (id TEXT PRIMARY KEY, workspace_id TEXT REFERENCES workspaces(id) ON DELETE CASCADE, delta_usd NUMERIC(12,6) NOT NULL, reason TEXT NOT NULL, ref TEXT, created_at BIGINT NOT NULL)",
+    "CREATE TABLE IF NOT EXISTS api_tokens (id TEXT PRIMARY KEY, user_id TEXT REFERENCES users(id) ON DELETE CASCADE, workspace_id TEXT REFERENCES workspaces(id) ON DELETE CASCADE, token_hash TEXT NOT NULL UNIQUE, scopes TEXT, last_used_at BIGINT, expires_at BIGINT, revoked_at BIGINT, created_at BIGINT NOT NULL)",
+    "CREATE TABLE IF NOT EXISTS reviews (id TEXT PRIMARY KEY, workspace_id TEXT, installation_id BIGINT, repo TEXT, pr_number BIGINT, head_sha TEXT, status TEXT, author TEXT, confidence NUMERIC(4,2), risk NUMERIC(4,2), findings JSONB, summary TEXT, error TEXT, customer_cost_usd NUMERIC(12,6) NOT NULL DEFAULT 0, upstream_cost_usd NUMERIC(12,6) NOT NULL DEFAULT 0, review_url TEXT, created_at BIGINT, updated_at BIGINT)",
+    // Manual reviews use installation_id 0, so their dedupe key is scoped to
+    // the workspace; installation reviews keep the installation key.
+    "ALTER TABLE reviews DROP CONSTRAINT IF EXISTS reviews_installation_id_repo_pr_number_head_sha_key",
+    // The review worker dedupes by (workspace, repo, PR, head); control creates
+    // the same index so both writers agree. Older global/scoped names go away.
+    "DROP INDEX IF EXISTS reviews_repo_pr_head",
+    "DROP INDEX IF EXISTS reviews_installation_head",
+    "DROP INDEX IF EXISTS reviews_manual_head",
+    // Legacy rows could repeat a workspace/repo/PR/head now that the key is
+    // workspace-scoped; keep the most advanced row before indexing.
+    "DELETE FROM reviews r WHERE r.workspace_id IS NOT NULL AND r.id <> (SELECT x.id FROM reviews x WHERE x.workspace_id = r.workspace_id AND x.repo = r.repo AND x.pr_number = r.pr_number AND x.head_sha = r.head_sha ORDER BY (x.review_url IS NOT NULL) DESC, (x.status = 'completed') DESC, x.created_at DESC, x.id DESC LIMIT 1)",
+    "CREATE UNIQUE INDEX IF NOT EXISTS reviews_workspace_head ON reviews (workspace_id, repo, pr_number, head_sha)",
+    "ALTER TABLE reviews ADD COLUMN IF NOT EXISTS author TEXT",
+    "ALTER TABLE reviews ADD COLUMN IF NOT EXISTS confidence NUMERIC(4,2)",
+    "ALTER TABLE reviews ADD COLUMN IF NOT EXISTS risk NUMERIC(4,2)",
+    "ALTER TABLE reviews ADD COLUMN IF NOT EXISTS findings JSONB",
+    // Written by freedas-review; the control plane copies them so analytics
+    // works before the worker has ever started.
+    "ALTER TABLE reviews ADD COLUMN IF NOT EXISTS customer_cost_usd NUMERIC(12,6) NOT NULL DEFAULT 0",
+    "ALTER TABLE reviews ADD COLUMN IF NOT EXISTS upstream_cost_usd NUMERIC(12,6) NOT NULL DEFAULT 0",
+    // The review worker records the posted review permalink here.
+    "ALTER TABLE reviews ADD COLUMN IF NOT EXISTS review_url TEXT",
+    "ALTER TABLE reviews ADD COLUMN IF NOT EXISTS summary TEXT",
+    "ALTER TABLE reviews ADD COLUMN IF NOT EXISTS error TEXT",
+    "CREATE TABLE IF NOT EXISTS sandboxes (id TEXT PRIMARY KEY, workspace_id TEXT, repo TEXT, base_branch TEXT, task TEXT, branch TEXT, pr_number BIGINT, pr_url TEXT, status TEXT, compute_rate_usd NUMERIC(12,6) NOT NULL DEFAULT 0, compute_seconds BIGINT, compute_cost_usd NUMERIC(12,6), failure_reason TEXT, created_at BIGINT, updated_at BIGINT, finished_at BIGINT)",
+    "ALTER TABLE sandboxes ADD COLUMN IF NOT EXISTS pr_number BIGINT",
+    "ALTER TABLE sandboxes ADD COLUMN IF NOT EXISTS pr_url TEXT",
+    "CREATE TABLE IF NOT EXISTS teams (id TEXT PRIMARY KEY, workspace_id TEXT REFERENCES workspaces(id) ON DELETE CASCADE, name TEXT NOT NULL, created_at BIGINT NOT NULL)",
+    "CREATE TABLE IF NOT EXISTS team_members (team_id TEXT REFERENCES teams(id) ON DELETE CASCADE, user_id TEXT REFERENCES users(id) ON DELETE CASCADE, PRIMARY KEY (team_id, user_id))",
+    "CREATE TABLE IF NOT EXISTS budgets (id TEXT PRIMARY KEY, workspace_id TEXT REFERENCES workspaces(id) ON DELETE CASCADE, scope TEXT NOT NULL CHECK (scope IN ('workspace','user','team')), subject_id TEXT, limit_usd NUMERIC(12,6) NOT NULL, period TEXT NOT NULL CHECK (period IN ('monthly','total')), created_at BIGINT NOT NULL)",
+    "CREATE TABLE IF NOT EXISTS invoices (id TEXT PRIMARY KEY, workspace_id TEXT REFERENCES workspaces(id) ON DELETE CASCADE, period_start BIGINT NOT NULL, period_end BIGINT NOT NULL, lines JSONB NOT NULL, total_usd NUMERIC(12,6) NOT NULL, created_at BIGINT NOT NULL, UNIQUE (workspace_id, period_start))",
+    // Older rows could repeat a month; keep the newest before the constraint.
+    "DELETE FROM invoices a USING invoices b WHERE a.workspace_id = b.workspace_id AND a.period_start = b.period_start AND (a.created_at, a.id) < (b.created_at, b.id)",
+    "CREATE UNIQUE INDEX IF NOT EXISTS invoices_workspace_period ON invoices (workspace_id, period_start)",
+    "CREATE TABLE IF NOT EXISTS usage_events (id TEXT PRIMARY KEY, workspace_id TEXT REFERENCES workspaces(id) ON DELETE CASCADE, user_id TEXT REFERENCES users(id), session_id TEXT, kind TEXT NOT NULL, provider TEXT, model TEXT, input_tokens BIGINT NOT NULL DEFAULT 0, output_tokens BIGINT NOT NULL DEFAULT 0, cost_usd NUMERIC(12,6) NOT NULL DEFAULT 0, created_at BIGINT NOT NULL)",
+    "CREATE TABLE IF NOT EXISTS audit_log (id TEXT PRIMARY KEY, workspace_id TEXT, user_id TEXT, action TEXT NOT NULL, subject TEXT, metadata JSONB NOT NULL DEFAULT '{}'::jsonb, created_at BIGINT NOT NULL)",
+    "CREATE TABLE IF NOT EXISTS github_installations (id BIGINT PRIMARY KEY, workspace_id TEXT REFERENCES workspaces(id) ON DELETE CASCADE, account_login TEXT NOT NULL, account_type TEXT NOT NULL, repository_selection TEXT NOT NULL, created_at BIGINT NOT NULL)",
+    "CREATE TABLE IF NOT EXISTS github_repositories (installation_id BIGINT REFERENCES github_installations(id) ON DELETE CASCADE, repo TEXT NOT NULL, enabled BOOLEAN NOT NULL DEFAULT TRUE, PRIMARY KEY (installation_id, repo))",
+    "CREATE TABLE IF NOT EXISTS review_policies (workspace_id TEXT PRIMARY KEY REFERENCES workspaces(id) ON DELETE CASCADE, automatic TEXT NOT NULL DEFAULT 'opened', include_drafts BOOLEAN NOT NULL DEFAULT FALSE, strictness TEXT NOT NULL DEFAULT 'medium', filters JSONB NOT NULL DEFAULT '[]'::jsonb, custom_rules JSONB NOT NULL DEFAULT '[]'::jsonb, context_files JSONB NOT NULL DEFAULT '[]'::jsonb, linked_repositories JSONB NOT NULL DEFAULT '[]'::jsonb, summary JSONB NOT NULL DEFAULT '{}'::jsonb, status_check JSONB, auto_approve JSONB, updated_at BIGINT NOT NULL)",
+    "CREATE TABLE IF NOT EXISTS session_metadata (session_id TEXT PRIMARY KEY, workspace_id TEXT REFERENCES workspaces(id) ON DELETE CASCADE, user_id TEXT REFERENCES users(id), project TEXT, model TEXT, input_tokens BIGINT NOT NULL DEFAULT 0, output_tokens BIGINT NOT NULL DEFAULT 0, cost_usd NUMERIC(12,6) NOT NULL DEFAULT 0, files_read JSONB NOT NULL DEFAULT '[]'::jsonb, prompt_excerpt TEXT, started_at BIGINT NOT NULL, ended_at BIGINT)",
+    "CREATE TABLE IF NOT EXISTS payment_methods (id TEXT PRIMARY KEY, workspace_id TEXT REFERENCES workspaces(id) ON DELETE CASCADE, provider TEXT NOT NULL, provider_customer_id TEXT, provider_payment_method_id TEXT, brand TEXT, last4 TEXT, created_at BIGINT NOT NULL)",
+    "CREATE TABLE IF NOT EXISTS device_codes (device_code TEXT PRIMARY KEY, user_code TEXT NOT NULL, user_id TEXT, workspace_id TEXT, approved BOOLEAN NOT NULL DEFAULT FALSE, expires_at BIGINT NOT NULL, created_at BIGINT NOT NULL)",
+    "CREATE TABLE IF NOT EXISTS skills (workspace_id TEXT NOT NULL, name TEXT NOT NULL, description TEXT NOT NULL DEFAULT '', sha256 TEXT NOT NULL, bytes BYTEA NOT NULL, updated_at BIGINT NOT NULL, PRIMARY KEY (workspace_id, name))",
+    "CREATE TABLE IF NOT EXISTS webhook_deliveries (id TEXT PRIMARY KEY, received_at BIGINT NOT NULL)",
+];
+
 /// Apply the control-plane DDL under a database lock. `CREATE TABLE IF NOT
 /// EXISTS` is not safe against a concurrent creator: two control planes
 /// starting at the same time race on the catalog and one of them dies with
@@ -1514,7 +1570,7 @@ mod tests {
         // The same schema the API tests use, applied under the database lock:
         // two bootstraps in the same database would otherwise race on the
         // catalog and one of them would die with a duplicate key error.
-        migrate(&pool, api_tests::SCHEMA).await.expect("schema");
+        migrate(&pool, crate::MIGRATIONS).await.expect("schema");
         // Seed owner + workspace, log in, and read the wallet back.
         use argon2::PasswordHasher;
         use argon2::password_hash::{SaltString, rand_core::OsRng};
@@ -4852,52 +4908,11 @@ async fn device_token(
 #[cfg(test)]
 mod api_tests {
     use super::*;
+    /// The production DDL, so the tests cannot drift from it.
+    const SCHEMA: &[&str] = crate::MIGRATIONS;
     use axum::body::Body;
     use http_body_util::BodyExt;
     use tower::ServiceExt;
-
-    pub(crate) const SCHEMA: &[&str] = &[
-        "CREATE TABLE IF NOT EXISTS users (id TEXT PRIMARY KEY, email TEXT NOT NULL UNIQUE, name TEXT NOT NULL, password_hash TEXT, oidc_sub TEXT UNIQUE, active BOOLEAN NOT NULL DEFAULT TRUE, created_at BIGINT NOT NULL)",
-        "ALTER TABLE users ADD COLUMN IF NOT EXISTS active BOOLEAN NOT NULL DEFAULT TRUE",
-        "CREATE TABLE IF NOT EXISTS workspaces (id TEXT PRIMARY KEY, slug TEXT NOT NULL UNIQUE, name TEXT NOT NULL, kind TEXT NOT NULL, owner_id TEXT REFERENCES users(id), settings JSONB NOT NULL DEFAULT '{}'::jsonb, created_at BIGINT NOT NULL)",
-        "CREATE TABLE IF NOT EXISTS memberships (workspace_id TEXT REFERENCES workspaces(id) ON DELETE CASCADE, user_id TEXT REFERENCES users(id) ON DELETE CASCADE, role TEXT NOT NULL, PRIMARY KEY (workspace_id, user_id))",
-        "CREATE TABLE IF NOT EXISTS wallet_ledger (id TEXT PRIMARY KEY, workspace_id TEXT REFERENCES workspaces(id) ON DELETE CASCADE, delta_usd NUMERIC(12,6) NOT NULL, reason TEXT NOT NULL, ref TEXT, created_at BIGINT NOT NULL)",
-        "CREATE TABLE IF NOT EXISTS api_tokens (id TEXT PRIMARY KEY, user_id TEXT REFERENCES users(id) ON DELETE CASCADE, workspace_id TEXT REFERENCES workspaces(id) ON DELETE CASCADE, token_hash TEXT NOT NULL UNIQUE, scopes TEXT, last_used_at BIGINT, expires_at BIGINT, revoked_at BIGINT, created_at BIGINT NOT NULL)",
-        "CREATE TABLE IF NOT EXISTS reviews (id TEXT PRIMARY KEY, workspace_id TEXT, installation_id BIGINT, repo TEXT, pr_number BIGINT, head_sha TEXT, status TEXT, author TEXT, confidence NUMERIC(4,2), risk NUMERIC(4,2), findings JSONB, summary TEXT, error TEXT, customer_cost_usd NUMERIC(12,6) NOT NULL DEFAULT 0, upstream_cost_usd NUMERIC(12,6) NOT NULL DEFAULT 0, review_url TEXT, created_at BIGINT, updated_at BIGINT)",
-        "ALTER TABLE reviews DROP CONSTRAINT IF EXISTS reviews_installation_id_repo_pr_number_head_sha_key",
-        "DROP INDEX IF EXISTS reviews_repo_pr_head",
-        "DROP INDEX IF EXISTS reviews_installation_head",
-        "DROP INDEX IF EXISTS reviews_manual_head",
-        "DELETE FROM reviews r WHERE r.workspace_id IS NOT NULL AND r.id <> (SELECT x.id FROM reviews x WHERE x.workspace_id = r.workspace_id AND x.repo = r.repo AND x.pr_number = r.pr_number AND x.head_sha = r.head_sha ORDER BY (x.review_url IS NOT NULL) DESC, (x.status = 'completed') DESC, x.created_at DESC, x.id DESC LIMIT 1)",
-        "CREATE UNIQUE INDEX IF NOT EXISTS reviews_workspace_head ON reviews (workspace_id, repo, pr_number, head_sha)",
-        "ALTER TABLE reviews ADD COLUMN IF NOT EXISTS author TEXT",
-        "ALTER TABLE reviews ADD COLUMN IF NOT EXISTS confidence NUMERIC(4,2)",
-        "ALTER TABLE reviews ADD COLUMN IF NOT EXISTS risk NUMERIC(4,2)",
-        "ALTER TABLE reviews ADD COLUMN IF NOT EXISTS findings JSONB",
-        "ALTER TABLE reviews ADD COLUMN IF NOT EXISTS customer_cost_usd NUMERIC(12,6) NOT NULL DEFAULT 0",
-        "ALTER TABLE reviews ADD COLUMN IF NOT EXISTS upstream_cost_usd NUMERIC(12,6) NOT NULL DEFAULT 0",
-        "ALTER TABLE reviews ADD COLUMN IF NOT EXISTS review_url TEXT",
-        "ALTER TABLE reviews ADD COLUMN IF NOT EXISTS summary TEXT",
-        "ALTER TABLE reviews ADD COLUMN IF NOT EXISTS error TEXT",
-        "CREATE TABLE IF NOT EXISTS sandboxes (id TEXT PRIMARY KEY, workspace_id TEXT, repo TEXT, base_branch TEXT, task TEXT, branch TEXT, pr_number BIGINT, pr_url TEXT, status TEXT, compute_rate_usd NUMERIC(12,6) NOT NULL DEFAULT 0, compute_seconds BIGINT, compute_cost_usd NUMERIC(12,6), failure_reason TEXT, created_at BIGINT, updated_at BIGINT, finished_at BIGINT)",
-        "ALTER TABLE sandboxes ADD COLUMN IF NOT EXISTS pr_number BIGINT",
-        "ALTER TABLE sandboxes ADD COLUMN IF NOT EXISTS pr_url TEXT",
-        "CREATE TABLE IF NOT EXISTS teams (id TEXT PRIMARY KEY, workspace_id TEXT REFERENCES workspaces(id) ON DELETE CASCADE, name TEXT NOT NULL, created_at BIGINT NOT NULL)",
-        "CREATE TABLE IF NOT EXISTS team_members (team_id TEXT REFERENCES teams(id) ON DELETE CASCADE, user_id TEXT REFERENCES users(id) ON DELETE CASCADE, PRIMARY KEY (team_id, user_id))",
-        "CREATE TABLE IF NOT EXISTS budgets (id TEXT PRIMARY KEY, workspace_id TEXT REFERENCES workspaces(id) ON DELETE CASCADE, scope TEXT NOT NULL CHECK (scope IN ('workspace','user','team')), subject_id TEXT, limit_usd NUMERIC(12,6) NOT NULL, period TEXT NOT NULL CHECK (period IN ('monthly','total')), created_at BIGINT NOT NULL)",
-        "CREATE TABLE IF NOT EXISTS invoices (id TEXT PRIMARY KEY, workspace_id TEXT REFERENCES workspaces(id) ON DELETE CASCADE, period_start BIGINT NOT NULL, period_end BIGINT NOT NULL, lines JSONB NOT NULL, total_usd NUMERIC(12,6) NOT NULL, created_at BIGINT NOT NULL, UNIQUE (workspace_id, period_start))",
-        "CREATE UNIQUE INDEX IF NOT EXISTS invoices_workspace_period ON invoices (workspace_id, period_start)",
-        "CREATE TABLE IF NOT EXISTS usage_events (id TEXT PRIMARY KEY, workspace_id TEXT REFERENCES workspaces(id) ON DELETE CASCADE, user_id TEXT REFERENCES users(id), session_id TEXT, kind TEXT NOT NULL, provider TEXT, model TEXT, input_tokens BIGINT NOT NULL DEFAULT 0, output_tokens BIGINT NOT NULL DEFAULT 0, cost_usd NUMERIC(12,6) NOT NULL DEFAULT 0, created_at BIGINT NOT NULL)",
-        "CREATE TABLE IF NOT EXISTS audit_log (id TEXT PRIMARY KEY, workspace_id TEXT, user_id TEXT, action TEXT NOT NULL, subject TEXT, metadata JSONB NOT NULL DEFAULT '{}'::jsonb, created_at BIGINT NOT NULL)",
-        "CREATE TABLE IF NOT EXISTS github_installations (id BIGINT PRIMARY KEY, workspace_id TEXT REFERENCES workspaces(id) ON DELETE CASCADE, account_login TEXT NOT NULL, account_type TEXT NOT NULL, repository_selection TEXT NOT NULL, created_at BIGINT NOT NULL)",
-        "CREATE TABLE IF NOT EXISTS github_repositories (installation_id BIGINT REFERENCES github_installations(id) ON DELETE CASCADE, repo TEXT NOT NULL, enabled BOOLEAN NOT NULL DEFAULT TRUE, PRIMARY KEY (installation_id, repo))",
-        "CREATE TABLE IF NOT EXISTS review_policies (workspace_id TEXT PRIMARY KEY REFERENCES workspaces(id) ON DELETE CASCADE, automatic TEXT NOT NULL DEFAULT 'opened', include_drafts BOOLEAN NOT NULL DEFAULT FALSE, strictness TEXT NOT NULL DEFAULT 'medium', filters JSONB NOT NULL DEFAULT '[]'::jsonb, custom_rules JSONB NOT NULL DEFAULT '[]'::jsonb, context_files JSONB NOT NULL DEFAULT '[]'::jsonb, linked_repositories JSONB NOT NULL DEFAULT '[]'::jsonb, summary JSONB NOT NULL DEFAULT '{}'::jsonb, status_check JSONB, auto_approve JSONB, updated_at BIGINT NOT NULL)",
-        "CREATE TABLE IF NOT EXISTS session_metadata (session_id TEXT PRIMARY KEY, workspace_id TEXT REFERENCES workspaces(id) ON DELETE CASCADE, user_id TEXT REFERENCES users(id), project TEXT, model TEXT, input_tokens BIGINT NOT NULL DEFAULT 0, output_tokens BIGINT NOT NULL DEFAULT 0, cost_usd NUMERIC(12,6) NOT NULL DEFAULT 0, files_read JSONB NOT NULL DEFAULT '[]'::jsonb, prompt_excerpt TEXT, started_at BIGINT NOT NULL, ended_at BIGINT)",
-        "CREATE TABLE IF NOT EXISTS payment_methods (id TEXT PRIMARY KEY, workspace_id TEXT REFERENCES workspaces(id) ON DELETE CASCADE, provider TEXT NOT NULL, provider_customer_id TEXT, provider_payment_method_id TEXT, brand TEXT, last4 TEXT, created_at BIGINT NOT NULL)",
-        "CREATE TABLE IF NOT EXISTS device_codes (device_code TEXT PRIMARY KEY, user_code TEXT NOT NULL, user_id TEXT, workspace_id TEXT, approved BOOLEAN NOT NULL DEFAULT FALSE, expires_at BIGINT NOT NULL, created_at BIGINT NOT NULL)",
-        "CREATE TABLE IF NOT EXISTS skills (workspace_id TEXT NOT NULL, name TEXT NOT NULL, description TEXT NOT NULL DEFAULT '', sha256 TEXT NOT NULL, bytes BYTEA NOT NULL, updated_at BIGINT NOT NULL, PRIMARY KEY (workspace_id, name))",
-        "CREATE TABLE IF NOT EXISTS webhook_deliveries (id TEXT PRIMARY KEY, received_at BIGINT NOT NULL)",
-    ];
 
     async fn call(
         app: &Router,
