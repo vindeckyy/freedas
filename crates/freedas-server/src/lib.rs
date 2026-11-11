@@ -988,7 +988,16 @@ async fn revert_session(State(s): State<AppState>, AxumPath(id): AxumPath<String
 async fn unrevert_session(State(s): State<AppState>, AxumPath(id): AxumPath<String>) -> ApiResult {
     let runner = runner_for(&s);
     match runner.redo(&s.paths.project_root, &id).await {
-        Ok(sha) => Ok(Json(json!({"restored": sha}))),
+        Ok(sha) => {
+            // Same event as revert: either direction changes the message
+            // list, so clients just reload.
+            s.emit(json!({
+                "type": "session.reverted",
+                "sessionID": id,
+                "restored": sha,
+            }));
+            Ok(Json(json!({"restored": sha})))
+        }
         Err(e) => Err(internal(e)),
     }
 }
