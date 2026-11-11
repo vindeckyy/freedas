@@ -144,6 +144,15 @@ check "uninstall help" "$BIN uninstall --help | grep -q keep-data"
 echo "== 13. debug =="
 check "debug prints sandbox status" "$BIN debug | grep -qi 'sandbox'"
 
+echo "== 14. acp stdio =="
+ACP_OUT=$(printf '%s\n%s\n' \
+  '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' \
+  "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"session/new\",\"params\":{\"cwd\":\"$(pwd)\"}}" \
+  | $BIN acp 2>/dev/null)
+check "acp initialize" "echo '$ACP_OUT' | grep -q 'protocolVersion'"
+check "acp session/new" "echo '$ACP_OUT' | grep -qo 'ses_[A-Z0-9]*'"
+check "acp bad agent"   "printf '%s\n' '{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"session/new\",\"params\":{\"cwd\":\"$(pwd)\",\"agent\":\"nope\"}}' | $BIN acp 2>/dev/null | grep -q 'unknown agent'"
+
 echo
 echo "PASS=$PASS FAIL=$FAIL"
 exit $FAIL
