@@ -19,7 +19,7 @@ clap = { workspace = true, features = ["env"] }
 anyhow.workspace = true
 sqlx = { version = "0.8", default-features = false, features = ["postgres", "runtime-tokio-rustls", "tls-rustls-ring"] }
 reqwest = { workspace = true, features = ["blocking"] }
-hmac = "0.12"
+hmac = "0.13"
 sha2 = "0.10"
 jsonwebtoken = "9"
 tempfile.workspace = true
