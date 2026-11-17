@@ -13,7 +13,7 @@ use axum::{
     response::Html,
     routing::{delete, get, post},
 };
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use rand::RngCore;
 use serde::Deserialize;
 use serde_json::{Value, json};
