@@ -4,7 +4,16 @@
 [advisories]
 version = 2
 yanked = "deny"
-ignore = []
+ignore = [
+  # RUSTSEC-2026-0543: chrono is unmaintained. Informational only, not a
+  # vulnerability: no CVE, no exploit, no patched version exists ("No safe
+  # upgrade is available"). chrono is a transitive-only dependency (via rmcp
+  # and schemars); no freedas crate depends on it directly, so it cannot be
+  # removed without dropping those crates. The advisory's suggested
+  # replacements (jiff/time) require upstream migration. Revisit if rmcp or
+  # schemars drop chrono.
+  "RUSTSEC-2026-0543",
+]
 
 [bans]
 multiple-versions = "warn"
